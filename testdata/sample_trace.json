@@ -1,0 +1,164 @@
+{
+  "id": "sample-trace-001",
+  "created_at": "2026-04-29T12:00:00Z",
+  "metadata": {
+    "command": "python agent.py \"What is the weather in NYC?\"",
+    "language": "python",
+    "working_dir": "/home/user/my-agent"
+  },
+  "spans": [
+    {
+      "id": "func-1",
+      "type": "FUNCTION",
+      "name": "__main__.<module>",
+      "start_time": "2026-04-29T12:00:00.000Z",
+      "end_time": "2026-04-29T12:00:03.000Z",
+      "attributes": {
+        "module": "__main__",
+        "function": "<module>",
+        "filename": "agent.py",
+        "lineno": 1
+      }
+    },
+    {
+      "id": "func-2",
+      "parent_id": "func-1",
+      "type": "FUNCTION",
+      "name": "agent.process_query",
+      "start_time": "2026-04-29T12:00:00.100Z",
+      "end_time": "2026-04-29T12:00:02.900Z",
+      "attributes": {
+        "module": "agent",
+        "function": "process_query",
+        "filename": "agent.py",
+        "lineno": 15,
+        "args": {"query": "\"What is the weather in NYC?\""}
+      }
+    },
+    {
+      "id": "func-3",
+      "parent_id": "func-2",
+      "type": "FUNCTION",
+      "name": "agent.call_llm",
+      "start_time": "2026-04-29T12:00:00.200Z",
+      "end_time": "2026-04-29T12:00:01.500Z",
+      "attributes": {
+        "module": "agent",
+        "function": "call_llm",
+        "filename": "agent.py",
+        "lineno": 30
+      }
+    },
+    {
+      "id": "user-1",
+      "parent_id": "api-1",
+      "type": "USER_INPUT",
+      "name": "user message",
+      "start_time": "2026-04-29T12:00:00.300Z",
+      "end_time": "2026-04-29T12:00:00.300Z",
+      "attributes": {
+        "content": "What is the weather in NYC?"
+      }
+    },
+    {
+      "id": "api-1",
+      "parent_id": "func-3",
+      "type": "LLM_REQUEST",
+      "name": "POST https://api.openai.com/v1/chat/completions",
+      "start_time": "2026-04-29T12:00:00.300Z",
+      "end_time": "2026-04-29T12:00:01.200Z",
+      "attributes": {
+        "http.method": "POST",
+        "http.url": "https://api.openai.com/v1/chat/completions",
+        "http.status_code": 200,
+        "llm.model": "gpt-4",
+        "llm.token_count.prompt": 45,
+        "llm.token_count.completion": 30,
+        "llm.token_count.total": 75
+      }
+    },
+    {
+      "id": "tool-1",
+      "parent_id": "api-1",
+      "type": "TOOL_CALL",
+      "name": "tool_call: get_weather",
+      "start_time": "2026-04-29T12:00:01.200Z",
+      "end_time": "2026-04-29T12:00:01.200Z",
+      "attributes": {
+        "tool_name": "get_weather",
+        "tool_call_id": "call_abc123",
+        "arguments": "{\"location\": \"NYC\", \"unit\": \"fahrenheit\"}"
+      }
+    },
+    {
+      "id": "func-4",
+      "parent_id": "func-2",
+      "type": "FUNCTION",
+      "name": "tools.execute_tool",
+      "start_time": "2026-04-29T12:00:01.300Z",
+      "end_time": "2026-04-29T12:00:01.800Z",
+      "attributes": {
+        "module": "tools",
+        "function": "execute_tool",
+        "filename": "tools.py",
+        "lineno": 42,
+        "args": {"name": "\"get_weather\""},
+        "return_value": "{\"temp\": 72, \"condition\": \"sunny\"}"
+      }
+    },
+    {
+      "id": "tool-result-1",
+      "parent_id": "api-2",
+      "type": "TOOL_RESULT",
+      "name": "tool_result: get_weather",
+      "start_time": "2026-04-29T12:00:01.800Z",
+      "end_time": "2026-04-29T12:00:01.800Z",
+      "attributes": {
+        "tool_name": "get_weather",
+        "content": "{\"temp\": 72, \"condition\": \"sunny\"}"
+      }
+    },
+    {
+      "id": "func-5",
+      "parent_id": "func-2",
+      "type": "FUNCTION",
+      "name": "agent.call_llm",
+      "start_time": "2026-04-29T12:00:01.900Z",
+      "end_time": "2026-04-29T12:00:02.800Z",
+      "attributes": {
+        "module": "agent",
+        "function": "call_llm",
+        "filename": "agent.py",
+        "lineno": 30
+      }
+    },
+    {
+      "id": "api-2",
+      "parent_id": "func-5",
+      "type": "LLM_REQUEST",
+      "name": "POST https://api.openai.com/v1/chat/completions",
+      "start_time": "2026-04-29T12:00:02.000Z",
+      "end_time": "2026-04-29T12:00:02.700Z",
+      "attributes": {
+        "http.method": "POST",
+        "http.url": "https://api.openai.com/v1/chat/completions",
+        "http.status_code": 200,
+        "llm.model": "gpt-4",
+        "llm.token_count.prompt": 80,
+        "llm.token_count.completion": 25,
+        "llm.token_count.total": 105
+      }
+    },
+    {
+      "id": "output-1",
+      "parent_id": "api-2",
+      "type": "AGENT_OUTPUT",
+      "name": "assistant response",
+      "start_time": "2026-04-29T12:00:02.700Z",
+      "end_time": "2026-04-29T12:00:02.700Z",
+      "attributes": {
+        "content": "The weather in NYC is currently 72°F and sunny. It's a great day to be outside!"
+      }
+    }
+  ]
+}

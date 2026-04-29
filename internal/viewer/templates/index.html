@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aperio — Execution Trace Viewer</title>
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #1a1a2e; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+
+    #topbar { background: #16213e; padding: 10px 20px; display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #0f3460; flex-shrink: 0; }
+    #topbar h1 { font-size: 16px; color: #e94560; font-weight: 600; }
+    #topbar .meta { font-size: 12px; color: #888; }
+    #topbar .meta span { color: #aaa; }
+    .filter-bar { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+    .filter-bar label { font-size: 12px; color: #888; }
+    .filter-btn { background: #0f3460; border: 1px solid #1a1a5e; color: #aaa; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+    .filter-btn.active { background: #e94560; color: white; border-color: #e94560; }
+    .filter-btn:hover { opacity: 0.85; }
+    #search { background: #0f3460; border: 1px solid #1a1a5e; color: #e0e0e0; padding: 4px 10px; border-radius: 4px; font-size: 12px; width: 200px; }
+
+    #main { display: flex; flex: 1; overflow: hidden; }
+    #cy { flex: 1; min-width: 0; }
+    #detail { width: 400px; background: #16213e; border-left: 1px solid #0f3460; overflow-y: auto; flex-shrink: 0; display: flex; flex-direction: column; }
+    #detail.collapsed { width: 0; overflow: hidden; }
+    #detail-header { padding: 12px 16px; border-bottom: 1px solid #0f3460; display: flex; justify-content: space-between; align-items: center; }
+    #detail-header h2 { font-size: 14px; color: #e94560; }
+    #detail-content { padding: 16px; flex: 1; overflow-y: auto; font-size: 13px; line-height: 1.5; }
+    .detail-section { margin-bottom: 16px; }
+    .detail-section h3 { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 6px; letter-spacing: 0.5px; }
+    .detail-value { background: #0a0a1a; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; font-family: 'Fira Code', 'Cascadia Code', monospace; font-size: 12px; }
+
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+    .badge-function { background: #4a4a6a; color: #c0c0e0; }
+    .badge-llm-request { background: #1a3a6a; color: #6ab0ff; }
+    .badge-llm-response { background: #1a3a5a; color: #5090dd; }
+    .badge-tool-call { background: #6a4a1a; color: #ffb060; }
+    .badge-tool-result { background: #5a3a1a; color: #dd9050; }
+    .badge-user-input { background: #1a5a3a; color: #60e090; }
+    .badge-agent-output { background: #5a1a5a; color: #d060d0; }
+    .badge-exec { background: #5a2a2a; color: #ff8080; }
+    .badge-fs-read { background: #2a4a2a; color: #80cc80; }
+    .badge-fs-write { background: #4a4a2a; color: #cccc60; }
+    .badge-net-io { background: #2a3a5a; color: #80aadd; }
+    .badge-db-query { background: #4a2a4a; color: #cc80cc; }
+
+    /* JSON syntax highlighting */
+    .json-key { color: #e94560; }
+    .json-string { color: #6ab0ff; }
+    .json-number { color: #ff9f43; }
+    .json-bool { color: #e94560; }
+    .json-null { color: #888; }
+
+    #empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: 14px; }
+  </style>
+</head>
+<body>
+
+<div id="topbar">
+  <h1>aperio</h1>
+  <div class="meta">
+    <span id="meta-command"></span> &middot;
+    <span id="meta-language"></span> &middot;
+    <span id="meta-spans"></span> spans &middot;
+    <span id="meta-time"></span>
+  </div>
+  <div class="filter-bar">
+    <label>Filter:</label>
+    <button class="filter-btn active" data-type="all">All</button>
+    <button class="filter-btn" data-type="FUNCTION">Function</button>
+    <button class="filter-btn" data-type="LLM_REQUEST">LLM</button>
+    <button class="filter-btn" data-type="TOOL_CALL">Tool</button>
+    <button class="filter-btn" data-type="EXEC">Exec</button>
+    <button class="filter-btn" data-type="EXEC:git">Git</button>
+    <button class="filter-btn" data-type="FS_READ,FS_WRITE">FS</button>
+    <button class="filter-btn" data-type="NET_IO">Net</button>
+    <button class="filter-btn" data-type="DB_QUERY">DB</button>
+    <input type="text" id="search" placeholder="Search spans..." />
+  </div>
+</div>
+
+<div id="main">
+  <div id="cy"></div>
+  <div id="detail">
+    <div id="detail-header">
+      <h2>Span Details</h2>
+    </div>
+    <div id="detail-content">
+      <div id="empty-state">Click a node to view details</div>
+    </div>
+  </div>
+</div>
+
+<!-- Trace data injected by Go server -->
+<script id="trace-data">
+  // APERIO_TRACE_DATA_PLACEHOLDER
+  var TRACE_DATA = {};
+</script>
+
+<script>
+(function() {
+  const trace = TRACE_DATA;
+  const spans = trace.spans || [];
+
+  // Populate metadata
+  document.getElementById('meta-command').textContent = (trace.metadata && trace.metadata.command) || '';
+  document.getElementById('meta-language').textContent = (trace.metadata && trace.metadata.language) || '';
+  document.getElementById('meta-spans').textContent = spans.length;
+  document.getElementById('meta-time').textContent = trace.created_at ? new Date(trace.created_at).toLocaleString() : '';
+
+  // Color and shape mapping
+  const typeConfig = {
+    'FUNCTION':     { color: '#6a6a8a', shape: 'round-rectangle', borderColor: '#8a8aaa' },
+    'LLM_REQUEST':  { color: '#1a5a9a', shape: 'ellipse', borderColor: '#3a8aee' },
+    'LLM_RESPONSE': { color: '#1a4a7a', shape: 'ellipse', borderColor: '#2a6abb' },
+    'TOOL_CALL':    { color: '#9a6a1a', shape: 'hexagon', borderColor: '#dda030' },
+    'TOOL_RESULT':  { color: '#7a5a1a', shape: 'hexagon', borderColor: '#bb8030' },
+    'USER_INPUT':   { color: '#1a7a4a', shape: 'round-rectangle', borderColor: '#40cc80' },
+    'AGENT_OUTPUT': { color: '#7a1a7a', shape: 'diamond', borderColor: '#cc40cc' },
+    'EXEC':         { color: '#7a2a2a', shape: 'barrel', borderColor: '#cc4040' },
+    'FS_READ':      { color: '#2a5a2a', shape: 'tag', borderColor: '#40aa40' },
+    'FS_WRITE':     { color: '#5a5a2a', shape: 'tag', borderColor: '#aaaa40' },
+    'NET_IO':       { color: '#2a4a7a', shape: 'rhomboid', borderColor: '#4080cc' },
+    'DB_QUERY':     { color: '#5a2a5a', shape: 'octagon', borderColor: '#aa40aa' },
+  };
+
+  function getConfig(type) {
+    return typeConfig[type] || { color: '#444', shape: 'rectangle', borderColor: '#666' };
+  }
+
+  function truncateLabel(name, maxLen) {
+    if (!name) return '?';
+    if (name.length <= maxLen) return name;
+    return name.substring(0, maxLen) + '...';
+  }
+
+  // Build Cytoscape elements
+  const elements = [];
+  const spanMap = {};
+  spans.forEach(s => { spanMap[s.id] = s; });
+
+  spans.forEach(s => {
+    const cfg = getConfig(s.type);
+    elements.push({
+      data: {
+        id: s.id,
+        label: truncateLabel(s.name, 40),
+        type: s.type,
+        spanData: s,
+      },
+      style: {
+        'background-color': cfg.color,
+        'shape': cfg.shape,
+        'border-color': cfg.borderColor,
+        'border-width': 2,
+      }
+    });
+
+    if (s.parent_id && spanMap[s.parent_id]) {
+      elements.push({
+        data: {
+          id: s.parent_id + '->' + s.id,
+          source: s.parent_id,
+          target: s.id,
+        }
+      });
+    }
+  });
+
+  // Initialize Cytoscape
+  const cy = cytoscape({
+    container: document.getElementById('cy'),
+    elements: elements,
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'label': 'data(label)',
+          'color': '#e0e0e0',
+          'font-size': '11px',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-wrap': 'wrap',
+          'text-max-width': '120px',
+          'width': 'label',
+          'height': 'label',
+          'padding': '12px',
+          'min-width': '60px',
+          'min-height': '30px',
+        }
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 2,
+          'line-color': '#333355',
+          'target-arrow-color': '#555577',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+          'arrow-scale': 0.8,
+        }
+      },
+      {
+        selector: 'node:selected',
+        style: {
+          'border-color': '#e94560',
+          'border-width': 3,
+        }
+      },
+      {
+        selector: '.highlighted',
+        style: {
+          'border-color': '#e94560',
+          'border-width': 3,
+          'line-color': '#e94560',
+          'target-arrow-color': '#e94560',
+        }
+      },
+      {
+        selector: '.dimmed',
+        style: {
+          'opacity': 0.2,
+        }
+      },
+    ],
+    layout: {
+      name: 'dagre',
+      rankDir: 'TB',
+      nodeSep: 40,
+      rankSep: 60,
+      animate: false,
+    },
+    wheelSensitivity: 0.3,
+  });
+
+  // Node click handler
+  cy.on('tap', 'node', function(evt) {
+    const node = evt.target;
+    const span = node.data('spanData');
+    showDetail(span);
+
+    // Highlight connected
+    cy.elements().removeClass('highlighted dimmed');
+    const neighborhood = node.closedNeighborhood();
+    cy.elements().not(neighborhood).addClass('dimmed');
+    neighborhood.addClass('highlighted');
+  });
+
+  cy.on('tap', function(evt) {
+    if (evt.target === cy) {
+      cy.elements().removeClass('highlighted dimmed');
+      document.getElementById('detail-content').innerHTML = '<div id="empty-state">Click a node to view details</div>';
+    }
+  });
+
+  function showDetail(span) {
+    const content = document.getElementById('detail-content');
+    const cfg = getConfig(span.type);
+    const badgeClass = 'badge-' + span.type.toLowerCase().replace(/_/g, '-');
+
+    let html = '';
+
+    // Header
+    html += '<div class="detail-section">';
+    html += `<span class="badge ${badgeClass}">${span.type}</span>`;
+    html += `<h3 style="margin-top: 8px; color: #e0e0e0; font-size: 14px; text-transform: none;">${escapeHtml(span.name)}</h3>`;
+    html += '</div>';
+
+    // Timing
+    if (span.start_time || span.end_time) {
+      html += '<div class="detail-section">';
+      html += '<h3>Timing</h3>';
+      html += '<div class="detail-value">';
+      if (span.start_time) html += 'Start: ' + new Date(span.start_time).toISOString() + '\n';
+      if (span.end_time) html += 'End:   ' + new Date(span.end_time).toISOString() + '\n';
+      if (span.start_time && span.end_time) {
+        const dur = new Date(span.end_time) - new Date(span.start_time);
+        html += 'Duration: ' + dur + 'ms';
+      }
+      html += '</div></div>';
+    }
+
+    // Attributes
+    if (span.attributes && Object.keys(span.attributes).length > 0) {
+      // Show important attributes first
+      const importantKeys = ['exec.category', 'exec.subcategory', 'content', 'query', 'tool_name', 'arguments', 'return_value', 'function', 'filename', 'lineno', 'module', 'command', 'exit_code', 'stdout', 'stderr', 'path', 'size', 'operation', 'host', 'port', 'database', 'row_count', 'url', 'status_code'];
+      const shownKeys = new Set();
+
+      for (const key of importantKeys) {
+        if (span.attributes[key] !== undefined) {
+          html += '<div class="detail-section">';
+          html += `<h3>${escapeHtml(key)}</h3>`;
+          html += `<div class="detail-value">${formatValue(span.attributes[key])}</div>`;
+          html += '</div>';
+          shownKeys.add(key);
+        }
+      }
+
+      // Show remaining attributes
+      const remaining = {};
+      for (const [k, v] of Object.entries(span.attributes)) {
+        if (!shownKeys.has(k)) remaining[k] = v;
+      }
+      if (Object.keys(remaining).length > 0) {
+        html += '<div class="detail-section">';
+        html += '<h3>All Attributes</h3>';
+        html += `<div class="detail-value">${syntaxHighlightJSON(remaining)}</div>`;
+        html += '</div>';
+      }
+    }
+
+    // IDs
+    html += '<div class="detail-section">';
+    html += '<h3>IDs</h3>';
+    html += '<div class="detail-value">';
+    html += 'Span: ' + span.id + '\n';
+    if (span.parent_id) html += 'Parent: ' + span.parent_id;
+    html += '</div></div>';
+
+    content.innerHTML = html;
+  }
+
+  function formatValue(val) {
+    if (val === null || val === undefined) return '<span class="json-null">null</span>';
+    if (typeof val === 'object') return syntaxHighlightJSON(val);
+    if (typeof val === 'string') {
+      // Try to parse as JSON for pretty-printing
+      try {
+        const parsed = JSON.parse(val);
+        if (typeof parsed === 'object') return syntaxHighlightJSON(parsed);
+      } catch {}
+      return escapeHtml(val);
+    }
+    return escapeHtml(String(val));
+  }
+
+  function syntaxHighlightJSON(obj) {
+    const json = JSON.stringify(obj, null, 2);
+    return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function(match) {
+      let cls = 'json-number';
+      if (/^"/.test(match)) {
+        if (/:$/.test(match)) {
+          cls = 'json-key';
+          match = match.replace(/:$/, '') + ':';
+        } else {
+          cls = 'json-string';
+        }
+      } else if (/true|false/.test(match)) {
+        cls = 'json-bool';
+      } else if (/null/.test(match)) {
+        cls = 'json-null';
+      }
+      return '<span class="' + cls + '">' + match + '</span>';
+    });
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  // Filter buttons
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      const filters = btn.dataset.type.split(',');
+      cy.elements().removeClass('dimmed');
+
+      if (filters.includes('all')) {
+        cy.elements().show();
+      } else {
+        cy.nodes().forEach(node => {
+          const span = node.data('spanData');
+          const nodeType = node.data('type');
+          let matches = false;
+
+          for (const filter of filters) {
+            if (filter.includes(':')) {
+              // Category filter like "EXEC:git"
+              const [type, category] = filter.split(':');
+              if (nodeType === type && span.attributes && span.attributes['exec.category'] === category) {
+                matches = true;
+              }
+            } else {
+              if (nodeType === filter) matches = true;
+            }
+          }
+
+          if (matches) {
+            node.show();
+            node.connectedEdges().show();
+          } else {
+            node.addClass('dimmed');
+          }
+        });
+      }
+    });
+  });
+
+  // Search
+  document.getElementById('search').addEventListener('input', function(e) {
+    const query = e.target.value.toLowerCase();
+    if (!query) {
+      cy.elements().removeClass('dimmed');
+      return;
+    }
+    cy.nodes().forEach(node => {
+      const span = node.data('spanData');
+      const matches = (span.name && span.name.toLowerCase().includes(query)) ||
+                      (span.type && span.type.toLowerCase().includes(query)) ||
+                      (JSON.stringify(span.attributes || {}).toLowerCase().includes(query));
+      if (matches) {
+        node.removeClass('dimmed');
+      } else {
+        node.addClass('dimmed');
+      }
+    });
+  });
+
+})();
+</script>
+
+</body>
+</html>
