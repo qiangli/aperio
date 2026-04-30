@@ -34,7 +34,7 @@ After capture, traces flow through: **Merge** (correlate function + API spans by
 
 ### Package Layout
 
-- `cmd/aperio/` — CLI with ten subcommands: `record`, `replay`, `view`, `diff`, `graph`, `evals`, `export`, `merge-traces`, `benchmark`, `compare`
+- `cmd/aperio/` — CLI (cobra) with subcommands: `record`, `replay`, `view`, `diff`, `graph`, `evals`, `export`, `merge-traces`, `benchmark`, `compare`, `leaderboard`
 - `internal/runner/` — Orchestrates the full record/replay lifecycle, language detection
 - `internal/tracer/` — Language-specific tracer implementations + embedded scripts (`scripts/`)
 - `internal/proxy/` — MITM proxy with recorder, replayer, cassette format (YAML), body-aware matching, response normalization
