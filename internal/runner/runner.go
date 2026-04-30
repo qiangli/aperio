@@ -42,6 +42,9 @@ type RecordOptions struct {
 
 	// AgentRole labels this agent's role (e.g., "orchestrator", "coder").
 	AgentRole string
+
+	// Redactor applies PII/sensitive data redaction to captured bodies and headers.
+	Redactor *proxy.Redactor
 }
 
 // ReplayOptions configures a replay session.
@@ -124,9 +127,10 @@ func Record(ctx context.Context, opts RecordOptions) error {
 
 	// Start the proxy
 	p, err := proxy.New(proxy.Options{
-		Mode:    proxy.ModeRecord,
-		Port:    0,
-		Targets: opts.Targets,
+		Mode:     proxy.ModeRecord,
+		Port:     0,
+		Targets:  opts.Targets,
+		Redactor: opts.Redactor,
 	})
 	if err != nil {
 		return fmt.Errorf("start proxy: %w", err)
@@ -266,7 +270,11 @@ func Record(ctx context.Context, opts RecordOptions) error {
 		Spans: allSpans,
 	}
 
-	trace.Enrich(result)
+	if opts.Redactor != nil {
+		trace.Enrich(result, trace.EnrichOptions{Redactor: opts.Redactor})
+	} else {
+		trace.Enrich(result)
+	}
 	trace.ClassifyAndAnnotate(result)
 
 	// Write trace

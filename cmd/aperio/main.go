@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -13,8 +14,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/qiangli/aperio/internal/benchmark"
+	_ "github.com/qiangli/aperio/internal/benchmark/adapters" // register benchmark adapters
 	"github.com/qiangli/aperio/internal/eval"
 	"github.com/qiangli/aperio/internal/export"
+	"github.com/qiangli/aperio/internal/proxy"
 	"github.com/qiangli/aperio/internal/runner"
 	"github.com/qiangli/aperio/internal/trace"
 	"github.com/qiangli/aperio/internal/viewer"
@@ -50,6 +53,7 @@ then renders the execution graph as an interactive HTML page.`,
 	cmd.AddCommand(benchmarkCmd())
 	cmd.AddCommand(compareCmd())
 	cmd.AddCommand(leaderboardCmd())
+	cmd.AddCommand(metricsCmd())
 
 	return cmd
 }
@@ -61,6 +65,8 @@ func recordCmd() *cobra.Command {
 	var goTracer string
 	var correlationID string
 	var agentRole string
+	var redactConfig string
+	var redactBuiltin bool
 
 	cmd := &cobra.Command{
 		Use:   "record [flags] -- <command> [args...]",
@@ -74,6 +80,27 @@ func recordCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
 
+			// Build redactor if configured
+			var redactor *proxy.Redactor
+			if redactConfig != "" || redactBuiltin {
+				var cfg proxy.RedactionConfig
+				if redactConfig != "" {
+					loaded, err := proxy.LoadRedactionConfig(redactConfig)
+					if err != nil {
+						return fmt.Errorf("load redaction config: %w", err)
+					}
+					cfg = *loaded
+				}
+				if redactBuiltin {
+					cfg.BuiltinPII = true
+				}
+				var err error
+				redactor, err = proxy.NewRedactor(cfg)
+				if err != nil {
+					return fmt.Errorf("create redactor: %w", err)
+				}
+			}
+
 			err := runner.Record(ctx, runner.RecordOptions{
 				Command:         args,
 				OutputPath:      output,
@@ -81,6 +108,7 @@ func recordCmd() *cobra.Command {
 				GoTracerBackend: goTracer,
 				CorrelationID:   correlationID,
 				AgentRole:       agentRole,
+				Redactor:        redactor,
 			})
 			if err != nil {
 				return err
@@ -114,6 +142,8 @@ func recordCmd() *cobra.Command {
 	cmd.Flags().StringVar(&goTracer, "go-tracer", "dlv", "Go tracer backend: dlv or runtime")
 	cmd.Flags().StringVar(&correlationID, "correlation-id", "", "correlation ID for multi-agent tracing")
 	cmd.Flags().StringVar(&agentRole, "agent-role", "", "role label for this agent (e.g., orchestrator, coder)")
+	cmd.Flags().StringVar(&redactConfig, "redact", "", "path to YAML redaction config file")
+	cmd.Flags().BoolVar(&redactBuiltin, "redact-builtin", false, "enable built-in PII redaction patterns (email, phone, IP, etc.)")
 
 	return cmd
 }
@@ -198,11 +228,14 @@ func viewCmd() *cobra.Command {
 }
 
 func diffCmd() *cobra.Command {
-	return &cobra.Command{
+	var viewFlag bool
+
+	cmd := &cobra.Command{
 		Use:     "diff <trace1> <trace2>",
 		Short:   "Compare two execution traces and show differences",
-		Example: `  aperio diff recorded.json replayed.json`,
-		Args:    cobra.ExactArgs(2),
+		Example: `  aperio diff recorded.json replayed.json
+  aperio diff --view recorded.json replayed.json`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			left, err := trace.ReadTrace(args[0])
 			if err != nil {
@@ -214,10 +247,35 @@ func diffCmd() *cobra.Command {
 			}
 
 			diffs := trace.Diff(left, right)
+
+			if viewFlag {
+				url, err := viewer.ServeDiff(viewer.DiffOptions{
+					Port:       0,
+					LeftFile:   args[0],
+					RightFile:  args[1],
+					DiffResult: diffs,
+				})
+				if err != nil {
+					return fmt.Errorf("start diff viewer: %w", err)
+				}
+				fmt.Printf("Diff viewer: %s\n", url)
+				openBrowser(url)
+
+				// Block until interrupted
+				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+				defer cancel()
+				<-ctx.Done()
+				return nil
+			}
+
 			fmt.Println(trace.FormatDiff(diffs))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&viewFlag, "view", false, "open side-by-side diff viewer in browser")
+
+	return cmd
 }
 
 func openBrowser(url string) {
@@ -362,6 +420,9 @@ func exportCmd() *cobra.Command {
 	var endpoint string
 	var dryRun bool
 	var serviceName string
+	var authToken string
+	var apiKey string
+	var compress bool
 
 	cmd := &cobra.Command{
 		Use:   "export <trace-file>",
@@ -389,7 +450,12 @@ and send it to an observability backend like Arize Phoenix, Jaeger, or Grafana T
 				return nil
 			}
 
-			if err := export.Send(otlpReq, export.SendOptions{Endpoint: endpoint}); err != nil {
+			if err := export.Send(otlpReq, export.SendOptions{
+				Endpoint:  endpoint,
+				AuthToken: authToken,
+				APIKey:    apiKey,
+				Compress:  compress,
+			}); err != nil {
 				return fmt.Errorf("export: %w", err)
 			}
 
@@ -401,6 +467,9 @@ and send it to an observability backend like Arize Phoenix, Jaeger, or Grafana T
 	cmd.Flags().StringVar(&endpoint, "endpoint", "http://localhost:6006/v1/traces", "OTLP endpoint URL")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print OTLP JSON to stdout without sending")
 	cmd.Flags().StringVar(&serviceName, "service-name", "aperio", "resource service name")
+	cmd.Flags().StringVar(&authToken, "auth-token", "", "Bearer token for OTLP endpoint authentication")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "API key for OTLP endpoint authentication")
+	cmd.Flags().BoolVar(&compress, "compress", false, "enable gzip compression of OTLP payload")
 
 	return cmd
 }
@@ -455,6 +524,9 @@ func benchmarkCmd() *cobra.Command {
 	var runs int
 	var format string
 	var pricingFile string
+	var passK string
+	var regression bool
+	var saveBaseline string
 
 	cmd := &cobra.Command{
 		Use:   "benchmark <spec.yaml>",
@@ -463,7 +535,9 @@ func benchmarkCmd() *cobra.Command {
 tools and produces a comparison report with rankings.`,
 		Example: `  aperio benchmark spec.yaml
   aperio benchmark spec.yaml --runs 5 --format html
-  aperio benchmark spec.yaml --pricing custom-pricing.yaml`,
+  aperio benchmark spec.yaml --pricing custom-pricing.yaml
+  aperio benchmark spec.yaml --pass-k 1,3,5 --runs 10
+  aperio benchmark spec.yaml --regression --save-baseline baselines/current.json`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			spec, err := benchmark.ParseSpec(args[0])
@@ -477,6 +551,21 @@ tools and produces a comparison report with rankings.`,
 			}
 			if runs > 0 {
 				spec.Runs = runs
+			}
+
+			// Parse pass@k values from flag
+			var passKValues []int
+			if passK != "" {
+				for _, s := range strings.Split(passK, ",") {
+					var k int
+					if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d", &k); err == nil && k > 0 {
+						passKValues = append(passKValues, k)
+					}
+				}
+			}
+			// Merge with spec-level pass_k
+			if len(spec.PassK) > 0 && len(passKValues) == 0 {
+				passKValues = spec.PassK
 			}
 
 			// Load pricing
@@ -502,8 +591,48 @@ tools and produces a comparison report with rankings.`,
 				return fmt.Errorf("benchmark: %w", err)
 			}
 
-			// Generate comparison
-			comparison := benchmark.Compare(results, pricing)
+			// Generate comparison (with pass@k if specified)
+			var comparison *benchmark.ComparisonResult
+			if len(passKValues) > 0 {
+				comparison = benchmark.CompareWithPassK(results, pricing, passKValues)
+			} else {
+				comparison = benchmark.Compare(results, pricing)
+			}
+
+			// Save baseline if requested
+			if saveBaseline != "" {
+				if err := benchmark.SaveBaseline(saveBaseline, comparison); err != nil {
+					return fmt.Errorf("save baseline: %w", err)
+				}
+				fmt.Printf("Baseline saved to: %s\n", saveBaseline)
+			}
+
+			// Check regression if enabled
+			if regression || spec.Regression != nil {
+				regConfig := spec.Regression
+				if regConfig == nil {
+					regConfig = &benchmark.RegressionConfig{}
+				}
+				baselinePath := regConfig.BaselinePath
+				if baselinePath == "" {
+					baselinePath = filepath.Join(spec.OutputDir, "baseline.json")
+				}
+				regResult, err := benchmark.CheckRegression(comparison, baselinePath, regConfig)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: regression check failed: %v\n", err)
+				} else if regResult.Regressed {
+					fmt.Fprintf(os.Stderr, "\n⚠ REGRESSION DETECTED:\n")
+					for _, d := range regResult.Details {
+						if d.Regressed {
+							fmt.Fprintf(os.Stderr, "  %s/%s: %.2f → %.2f (%.1f%% change)\n",
+								d.Tool, d.Metric, d.Baseline, d.Current, d.DeltaPct*100)
+						}
+					}
+					if regConfig.FailOnRegression {
+						defer func() { os.Exit(1) }()
+					}
+				}
+			}
 
 			// Update leaderboard
 			lbPath := filepath.Join(spec.OutputDir, "leaderboard.json")
@@ -558,6 +687,70 @@ tools and produces a comparison report with rankings.`,
 	cmd.Flags().IntVar(&runs, "runs", 0, "override number of runs per tool")
 	cmd.Flags().StringVar(&format, "format", "html", "report format: html, csv, json, all")
 	cmd.Flags().StringVar(&pricingFile, "pricing", "", "path to custom pricing YAML")
+	cmd.Flags().StringVar(&passK, "pass-k", "", "compute pass@k metrics (comma-separated, e.g., 1,3,5)")
+	cmd.Flags().BoolVar(&regression, "regression", false, "check for performance regressions against baseline")
+	cmd.Flags().StringVar(&saveBaseline, "save-baseline", "", "save current results as baseline to this path")
+
+	cmd.AddCommand(listTasksCmd())
+
+	return cmd
+}
+
+func listTasksCmd() *cobra.Command {
+	var adapterName string
+	var limit int
+	var difficulty string
+	var languages string
+
+	cmd := &cobra.Command{
+		Use:   "list-tasks",
+		Short: "List available tasks from a benchmark adapter",
+		Example: `  aperio benchmark list-tasks --adapter swe-bench
+  aperio benchmark list-tasks --adapter exercism --languages python,go --limit 20`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if adapterName == "" {
+				return fmt.Errorf("--adapter is required")
+			}
+
+			spec := &benchmark.AdapterSpec{Name: adapterName}
+			adapter, err := benchmark.GetAdapter(spec)
+			if err != nil {
+				return err
+			}
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer cancel()
+
+			if err := adapter.Setup(ctx); err != nil {
+				return fmt.Errorf("adapter setup: %w", err)
+			}
+
+			filter := benchmark.AdapterFilter{
+				Limit:      limit,
+				Difficulty: difficulty,
+			}
+			if languages != "" {
+				filter.Languages = strings.Split(languages, ",")
+			}
+
+			tasks, err := adapter.ListTasks(filter)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Found %d tasks from adapter %q:\n", len(tasks), adapterName)
+			for _, id := range tasks {
+				fmt.Printf("  %s\n", id)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&adapterName, "adapter", "", "adapter name (swe-bench, exercism, terminal-bench)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum number of tasks to list")
+	cmd.Flags().StringVar(&difficulty, "difficulty", "", "filter by difficulty (easy, medium, hard)")
+	cmd.Flags().StringVar(&languages, "languages", "", "filter by languages (comma-separated)")
 
 	return cmd
 }
@@ -700,6 +893,41 @@ all-time best scores, recent entries, and trends per tool.`,
 	cmd.Flags().BoolVar(&clear, "clear", false, "reset the leaderboard")
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
 	cmd.Flags().StringVar(&lbPath, "path", "", "leaderboard file path")
+
+	return cmd
+}
+
+func metricsCmd() *cobra.Command {
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "metrics <trace-file> [trace-file...]",
+		Short: "Start a Prometheus metrics endpoint for trace data",
+		Long: `Load one or more trace files and expose agent performance metrics
+via a Prometheus-compatible /metrics HTTP endpoint.`,
+		Example: `  aperio metrics trace.json --port 9090
+  aperio metrics traces/*.json`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			collector := export.NewMetricsCollector()
+
+			for _, path := range args {
+				t, err := trace.ReadTrace(path)
+				if err != nil {
+					return fmt.Errorf("read trace %s: %w", path, err)
+				}
+				collector.RecordTrace(t)
+				fmt.Printf("Loaded trace: %s (%d spans)\n", path, len(t.Spans))
+			}
+
+			addr := fmt.Sprintf(":%d", port)
+			http.Handle("/metrics", collector.Handler())
+			fmt.Printf("Metrics endpoint: http://localhost:%d/metrics\n", port)
+			return http.ListenAndServe(addr, nil)
+		},
+	}
+
+	cmd.Flags().IntVar(&port, "port", 9090, "port for metrics HTTP server")
 
 	return cmd
 }

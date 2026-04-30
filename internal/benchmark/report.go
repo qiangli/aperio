@@ -42,6 +42,52 @@ func FormatText(cr *ComparisonResult) string {
 	}
 	fmt.Fprintf(&b, "\n")
 
+	// pass@k metrics (if available)
+	hasPassK := false
+	for _, ts := range cr.PerTool {
+		if ts.AvgMetrics != nil && len(ts.AvgMetrics.PassAtK) > 0 {
+			hasPassK = true
+			break
+		}
+	}
+	if hasPassK {
+		fmt.Fprintf(&b, "Pass@K Metrics:\n")
+		// Collect all k values
+		kSet := make(map[int]bool)
+		for _, ts := range cr.PerTool {
+			if ts.AvgMetrics != nil {
+				for k := range ts.AvgMetrics.PassAtK {
+					kSet[k] = true
+				}
+			}
+		}
+		var ks []int
+		for k := range kSet {
+			ks = append(ks, k)
+		}
+		sort.Ints(ks)
+
+		fmt.Fprintf(&b, "  %-20s", "Tool")
+		for _, k := range ks {
+			fmt.Fprintf(&b, " %10s", fmt.Sprintf("pass@%d", k))
+		}
+		fmt.Fprintf(&b, "\n")
+		fmt.Fprintf(&b, "  %s\n", strings.Repeat("-", 20+11*len(ks)))
+
+		for _, ts := range cr.PerTool {
+			fmt.Fprintf(&b, "  %-20s", ts.Tool)
+			for _, k := range ks {
+				val := 0.0
+				if ts.AvgMetrics != nil && ts.AvgMetrics.PassAtK != nil {
+					val = ts.AvgMetrics.PassAtK[k]
+				}
+				fmt.Fprintf(&b, " %9.1f%%", val*100)
+			}
+			fmt.Fprintf(&b, "\n")
+		}
+		fmt.Fprintf(&b, "\n")
+	}
+
 	// Metric rankings
 	fmt.Fprintf(&b, "Per-Metric Rankings:\n")
 	metricNames := make([]string, 0, len(cr.Rankings))
@@ -104,9 +150,27 @@ func GenerateCSV(cr *ComparisonResult, outputPath string) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
+	// Collect pass@k columns
+	kSet := make(map[int]bool)
+	for _, ts := range cr.PerTool {
+		if ts.AvgMetrics != nil {
+			for k := range ts.AvgMetrics.PassAtK {
+				kSet[k] = true
+			}
+		}
+	}
+	var ks []int
+	for k := range kSet {
+		ks = append(ks, k)
+	}
+	sort.Ints(ks)
+
 	// Header
 	header := []string{"Tool", "Duration(ms)", "Cost($)", "InputTokens", "OutputTokens",
 		"TokenEfficiency", "LLMCalls", "ToolCalls", "FilesWritten", "PassRate", "Errors", "AvgRank", "Wins"}
+	for _, k := range ks {
+		header = append(header, fmt.Sprintf("Pass@%d", k))
+	}
 	w.Write(header)
 
 	// Find aggregate scores by tool
@@ -135,6 +199,13 @@ func GenerateCSV(cr *ComparisonResult, outputPath string) error {
 			fmt.Sprintf("%d", m.ErrorCount),
 			fmt.Sprintf("%.2f", agg.AvgRank),
 			fmt.Sprintf("%d", agg.WinCount),
+		}
+		for _, k := range ks {
+			val := 0.0
+			if m.PassAtK != nil {
+				val = m.PassAtK[k]
+			}
+			row = append(row, fmt.Sprintf("%.4f", val))
 		}
 		w.Write(row)
 	}

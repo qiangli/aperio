@@ -12,6 +12,12 @@ var attrMapping = map[string]string{
 	"http.status_code":           "http.response.status_code",
 	"command":                    "process.command",
 	"path":                       "file.path",
+	"context_type":               "aperio.context.type",
+	"token_estimate":             "aperio.context.token_estimate",
+	"similarity_scores":          "aperio.vector.similarity_scores",
+	"result_count":               "aperio.retrieval.result_count",
+	"query":                      "aperio.vector.query",
+	"source":                     "aperio.retrieval.source",
 }
 
 // mapAttributeName returns the OTEL semantic convention name for an Aperio attribute,

@@ -49,15 +49,45 @@ type InstrumentationScope struct {
 
 // OTLPSpan is the OTLP JSON representation of a span.
 type OTLPSpan struct {
-	TraceID           string     `json:"traceId"`
-	SpanID            string     `json:"spanId"`
-	ParentSpanID      string     `json:"parentSpanId,omitempty"`
+	TraceID           string      `json:"traceId"`
+	SpanID            string      `json:"spanId"`
+	ParentSpanID      string      `json:"parentSpanId,omitempty"`
+	Name              string      `json:"name"`
+	Kind              int         `json:"kind"`
+	StartTimeUnixNano string      `json:"startTimeUnixNano"`
+	EndTimeUnixNano   string      `json:"endTimeUnixNano"`
+	Attributes        []KeyValue  `json:"attributes,omitempty"`
+	Status            *SpanStatus `json:"status,omitempty"`
+	Events            []SpanEvent `json:"events,omitempty"`
+	Links             []SpanLink  `json:"links,omitempty"`
+}
+
+// SpanStatus represents the status of a span.
+type SpanStatus struct {
+	Code    int    `json:"code"`              // 0=Unset, 1=OK, 2=Error
+	Message string `json:"message,omitempty"`
+}
+
+// SpanEvent represents a named event within a span's timeline.
+type SpanEvent struct {
 	Name              string     `json:"name"`
-	Kind              int        `json:"kind"`
-	StartTimeUnixNano string     `json:"startTimeUnixNano"`
-	EndTimeUnixNano   string     `json:"endTimeUnixNano"`
+	TimeUnixNano      string     `json:"timeUnixNano"`
 	Attributes        []KeyValue `json:"attributes,omitempty"`
 }
+
+// SpanLink connects a span to another span in a different (or same) trace.
+type SpanLink struct {
+	TraceID    string     `json:"traceId"`
+	SpanID     string     `json:"spanId"`
+	Attributes []KeyValue `json:"attributes,omitempty"`
+}
+
+// OTLP status codes.
+const (
+	StatusCodeUnset = 0
+	StatusCodeOK    = 1
+	StatusCodeError = 2
+)
 
 // KeyValue is an OTLP attribute key-value pair.
 type KeyValue struct {
@@ -128,7 +158,101 @@ func convertSpan(s *trace.Span, traceID string) OTLPSpan {
 		os.ParentSpanID = uuidToSpanID(s.ParentID)
 	}
 
+	// Set span status from attributes
+	os.Status = deriveStatus(s)
+
+	// Add token usage events for LLM spans
+	if s.Type == trace.SpanLLMRequest {
+		if event := tokenUsageEvent(s); event != nil {
+			os.Events = append(os.Events, *event)
+		}
+	}
+
+	// Add span links for multi-agent correlation
+	if link := correlationLink(s); link != nil {
+		os.Links = append(os.Links, *link)
+	}
+
 	return os
+}
+
+func deriveStatus(s *trace.Span) *SpanStatus {
+	if s.Attributes == nil {
+		return &SpanStatus{Code: StatusCodeOK}
+	}
+
+	// Check HTTP status code
+	if statusCode := s.IntAttr("http.status_code"); statusCode >= 400 {
+		return &SpanStatus{
+			Code:    StatusCodeError,
+			Message: fmt.Sprintf("HTTP %d", statusCode),
+		}
+	}
+
+	// Check exit code
+	if exitCode := s.IntAttr("exit_code"); exitCode != 0 {
+		return &SpanStatus{
+			Code:    StatusCodeError,
+			Message: fmt.Sprintf("exit code %d", exitCode),
+		}
+	}
+
+	return &SpanStatus{Code: StatusCodeOK}
+}
+
+func tokenUsageEvent(s *trace.Span) *SpanEvent {
+	prompt := s.IntAttr("llm.token_count.prompt")
+	completion := s.IntAttr("llm.token_count.completion")
+	input := s.IntAttr("llm.token_count.input")
+	output := s.IntAttr("llm.token_count.output")
+
+	// Use whichever naming convention is present
+	if prompt == 0 && input > 0 {
+		prompt = input
+	}
+	if completion == 0 && output > 0 {
+		completion = output
+	}
+
+	if prompt == 0 && completion == 0 {
+		return nil
+	}
+
+	promptStr := fmt.Sprintf("%d", prompt)
+	completionStr := fmt.Sprintf("%d", completion)
+
+	return &SpanEvent{
+		Name:         "gen_ai.usage",
+		TimeUnixNano: timeToNano(s.EndTime),
+		Attributes: []KeyValue{
+			{Key: "gen_ai.usage.input_tokens", Value: AnyValue{IntValue: &promptStr}},
+			{Key: "gen_ai.usage.output_tokens", Value: AnyValue{IntValue: &completionStr}},
+		},
+	}
+}
+
+func correlationLink(s *trace.Span) *SpanLink {
+	if s.Attributes == nil {
+		return nil
+	}
+	corrID := s.StringAttr("correlation.id")
+	parentTrace := s.StringAttr("agent.source_trace")
+	if corrID == "" && parentTrace == "" {
+		return nil
+	}
+
+	linkTraceID := corrID
+	if parentTrace != "" {
+		linkTraceID = parentTrace
+	}
+
+	return &SpanLink{
+		TraceID: uuidToTraceID(linkTraceID),
+		SpanID:  uuidToSpanID(s.ID),
+		Attributes: []KeyValue{
+			stringKV("aperio.link.type", "multi-agent-correlation"),
+		},
+	}
 }
 
 func convertAttributes(s *trace.Span) []KeyValue {
@@ -180,6 +304,12 @@ func spanTypeToKind(t trace.SpanType) int {
 		return SpanKindClient
 	case trace.SpanNetIO:
 		return SpanKindClient
+	case trace.SpanMemoryRetrieval:
+		return SpanKindClient
+	case trace.SpanVectorSearch:
+		return SpanKindClient
+	case trace.SpanContextInjection:
+		return SpanKindInternal
 	default:
 		return SpanKindInternal
 	}

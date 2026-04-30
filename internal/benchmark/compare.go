@@ -1,6 +1,7 @@
 package benchmark
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/qiangli/aperio/internal/eval"
@@ -40,6 +41,49 @@ var lowerIsBetter = map[string]bool{
 	"error_count":        true,
 }
 
+// metricNames returns the standard list of metrics for comparison.
+func metricNames() []string {
+	return []string{
+		"total_duration_ms", "total_cost", "total_input_tokens", "total_output_tokens",
+		"token_efficiency", "tool_call_count", "llm_call_count",
+		"p50_latency_ms", "p95_latency_ms",
+		"files_written", "pass_rate", "error_count",
+		"pass_at_1",
+	}
+}
+
+// CompareWithPassK performs comparison and computes pass@k if passKValues are specified.
+func CompareWithPassK(results *BenchmarkResults, pricing PricingTable, passKValues []int) *ComparisonResult {
+	cr := Compare(results, pricing)
+
+	if len(passKValues) > 0 {
+		for i, toolRun := range results.ToolRuns {
+			passK := ComputeAllPassK(toolRun.Runs, passKValues)
+			if cr.PerTool[i].AvgMetrics != nil {
+				cr.PerTool[i].AvgMetrics.PassAtK = passK
+			}
+		}
+		// Update metric matrix with pass@k values
+		for _, k := range passKValues {
+			key := fmt.Sprintf("pass_at_%d", k)
+			var values []float64
+			for _, ts := range cr.PerTool {
+				if ts.AvgMetrics != nil && ts.AvgMetrics.PassAtK != nil {
+					values = append(values, ts.AvgMetrics.PassAtK[k])
+				} else {
+					values = append(values, 0)
+				}
+			}
+			cr.MetricMatrix[key] = values
+			cr.Rankings[key] = rankValues(values, false) // higher is better
+		}
+		// Recompute aggregates with new metrics
+		cr.AggregateScores = computeAggregates(cr.Tools, cr.Rankings)
+	}
+
+	return cr
+}
+
 // Compare performs an N-way comparison across benchmark results.
 func Compare(results *BenchmarkResults, pricing PricingTable) *ComparisonResult {
 	cr := &ComparisonResult{
@@ -70,12 +114,7 @@ func Compare(results *BenchmarkResults, pricing PricingTable) *ComparisonResult 
 	}
 
 	// Build metric matrix
-	metrics := []string{
-		"total_duration_ms", "total_cost", "total_input_tokens", "total_output_tokens",
-		"token_efficiency", "tool_call_count", "llm_call_count",
-		"p50_latency_ms", "p95_latency_ms",
-		"files_written", "pass_rate", "error_count",
-	}
+	metrics := metricNames()
 
 	for _, metric := range metrics {
 		var values []float64
@@ -115,14 +154,7 @@ func CompareTraces(tools []string, traces []*trace.Trace, pricing PricingTable) 
 		})
 	}
 
-	metrics := []string{
-		"total_duration_ms", "total_cost", "total_input_tokens", "total_output_tokens",
-		"token_efficiency", "tool_call_count", "llm_call_count",
-		"p50_latency_ms", "p95_latency_ms",
-		"files_written", "pass_rate", "error_count",
-	}
-
-	for _, metric := range metrics {
+	for _, metric := range metricNames() {
 		var values []float64
 		for _, ts := range cr.PerTool {
 			values = append(values, getMetricValue(ts.AvgMetrics, metric))
@@ -186,6 +218,11 @@ func getMetricValue(m *TraceMetrics, metric string) float64 {
 		return m.PassRate
 	case "error_count":
 		return float64(m.ErrorCount)
+	case "pass_at_1":
+		if m.PassAtK != nil {
+			return m.PassAtK[1]
+		}
+		return 0
 	default:
 		return 0
 	}

@@ -39,6 +39,9 @@ type Options struct {
 	Port    int
 	Targets []string // LLM API hosts to intercept (empty = all)
 
+	// Redactor applies redaction rules to captured bodies and headers.
+	Redactor *Redactor
+
 	// For replay mode
 	RecordedTrace *trace.Trace
 	Strict        bool
@@ -63,7 +66,7 @@ func New(opts Options) (*Proxy, error) {
 
 	switch opts.Mode {
 	case ModeRecord:
-		setupRecorder(p, server, opts.Targets)
+		setupRecorder(p, server, opts.Redactor)
 	case ModeReplay:
 		setupReplayer(p, server, opts)
 	}

@@ -41,6 +41,81 @@ type RunResult struct {
 
 // Run executes the full benchmark as defined in the spec.
 func Run(ctx context.Context, spec *BenchmarkSpec) (*BenchmarkResults, error) {
+	// If adapter is specified, resolve and expand tasks.
+	if spec.Adapter != nil {
+		return runWithAdapter(ctx, spec)
+	}
+
+	return runSpec(ctx, spec)
+}
+
+// runWithAdapter resolves the adapter, lists tasks, and runs each.
+func runWithAdapter(ctx context.Context, spec *BenchmarkSpec) (*BenchmarkResults, error) {
+	adapter, err := GetAdapter(spec.Adapter)
+	if err != nil {
+		return nil, fmt.Errorf("get adapter: %w", err)
+	}
+
+	if err := adapter.Setup(ctx); err != nil {
+		return nil, fmt.Errorf("adapter setup: %w", err)
+	}
+
+	tasks, err := adapter.ListTasks(spec.Adapter.Filter)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+
+	log.Info().Str("adapter", adapter.Name()).Int("tasks", len(tasks)).Msg("adapter resolved tasks")
+
+	// Run each task as a separate spec and aggregate results
+	allResults := &BenchmarkResults{
+		Spec:      *spec,
+		StartTime: time.Now(),
+	}
+
+	// Initialize tool results
+	toolRunMap := make(map[string]*ToolRunResult)
+	for _, tool := range spec.Tools {
+		toolRunMap[tool.Name] = &ToolRunResult{Tool: tool}
+	}
+
+	for _, taskID := range tasks {
+		taskSpec, err := adapter.GenerateSpec(taskID, AdapterOptions{
+			Tools:     spec.Tools,
+			Runs:      spec.Runs,
+			OutputDir: spec.OutputDir,
+			Docker:    spec.Docker,
+			Timeout:   spec.Task.Timeout,
+		})
+		if err != nil {
+			log.Warn().Str("task", taskID).Err(err).Msg("skip task")
+			continue
+		}
+
+		taskResults, err := runSpec(ctx, taskSpec)
+		if err != nil {
+			log.Warn().Str("task", taskID).Err(err).Msg("task failed")
+			continue
+		}
+
+		// Merge task results into aggregate
+		for _, tr := range taskResults.ToolRuns {
+			if existing, ok := toolRunMap[tr.Tool.Name]; ok {
+				existing.Runs = append(existing.Runs, tr.Runs...)
+			}
+		}
+	}
+
+	for _, tool := range spec.Tools {
+		allResults.ToolRuns = append(allResults.ToolRuns, *toolRunMap[tool.Name])
+	}
+	allResults.EndTime = time.Now()
+
+	return allResults, nil
+}
+
+// runSpec executes a single benchmark spec (the core run logic).
+func runSpec(ctx context.Context, spec *BenchmarkSpec) (*BenchmarkResults, error) {
 	results := &BenchmarkResults{
 		Spec:      *spec,
 		StartTime: time.Now(),
@@ -115,26 +190,42 @@ func runTool(ctx context.Context, spec *BenchmarkSpec, tool *ToolSpec, runIndex 
 	var tr *trace.Trace
 	var exitCode int
 
-	switch tool.Mode {
-	case "source":
-		exitCode, err = runSourceMode(ctx, expandedCmd, tool, spec, tracePath, timeout)
-		if err != nil && result.Error == "" {
-			result.Error = err.Error()
-		}
-		// Load the trace for validation
-		tr, _ = trace.ReadTrace(tracePath)
-
-	case "blackbox":
-		tr, exitCode, err = BlackBoxRecord(ctx, BlackBoxOptions{
+	// Docker-isolated execution
+	if spec.Docker != nil && spec.Docker.Enabled {
+		dr := &DockerRunner{Config: *spec.Docker}
+		exitCode, err = dr.Run(ctx, DockerRunOptions{
 			Command:    expandedCmd,
 			WorkingDir: spec.Task.WorkingDir,
-			OutputPath: tracePath,
-			Targets:    tool.Targets,
 			Env:        tool.Env,
+			TracePath:  tracePath,
 			Timeout:    timeout,
 		})
 		if err != nil && result.Error == "" {
 			result.Error = err.Error()
+		}
+		tr, _ = trace.ReadTrace(tracePath)
+	} else {
+		// Standard execution (source or blackbox mode)
+		switch tool.Mode {
+		case "source":
+			exitCode, err = runSourceMode(ctx, expandedCmd, tool, spec, tracePath, timeout)
+			if err != nil && result.Error == "" {
+				result.Error = err.Error()
+			}
+			tr, _ = trace.ReadTrace(tracePath)
+
+		case "blackbox":
+			tr, exitCode, err = BlackBoxRecord(ctx, BlackBoxOptions{
+				Command:    expandedCmd,
+				WorkingDir: spec.Task.WorkingDir,
+				OutputPath: tracePath,
+				Targets:    tool.Targets,
+				Env:        tool.Env,
+				Timeout:    timeout,
+			})
+			if err != nil && result.Error == "" {
+				result.Error = err.Error()
+			}
 		}
 	}
 

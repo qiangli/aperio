@@ -26,7 +26,7 @@ type requestContext struct {
 	body      []byte
 }
 
-func setupRecorder(p *Proxy, server *goproxy.ProxyHttpServer, targets []string) {
+func setupRecorder(p *Proxy, server *goproxy.ProxyHttpServer, redactor *Redactor) {
 	server.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		host := req.URL.Host
 		if !p.shouldIntercept(host) {
@@ -64,15 +64,16 @@ func setupRecorder(p *Proxy, server *goproxy.ProxyHttpServer, targets []string) 
 			req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", traceHex, spanHex))
 		}
 
-		// Capture headers (strip authorization)
-		headers := make(map[string]string)
+		// Capture headers (with redaction)
+		rawHeaders := make(map[string]string, len(req.Header))
 		for k, v := range req.Header {
-			lower := strings.ToLower(k)
-			if lower == "authorization" || lower == "x-api-key" {
-				headers[k] = "[REDACTED]"
-			} else {
-				headers[k] = strings.Join(v, ", ")
-			}
+			rawHeaders[k] = strings.Join(v, ", ")
+		}
+		var headers map[string]string
+		if redactor != nil {
+			headers = redactor.RedactHeaders(rawHeaders)
+		} else {
+			headers = DefaultRedactHeaders(rawHeaders)
 		}
 
 		rctx := &requestContext{
@@ -118,23 +119,39 @@ func setupRecorder(p *Proxy, server *goproxy.ProxyHttpServer, targets []string) 
 
 		endTime := time.Now()
 
+		// Apply body-level redaction if configured
+		reqBodyBytes := rctx.body
+		respBodyBytes := respBody
+		if redactor != nil {
+			if len(reqBodyBytes) > 0 {
+				if redacted, err := redactor.RedactJSON(reqBodyBytes); err == nil {
+					reqBodyBytes = redacted
+				}
+			}
+			if len(respBodyBytes) > 0 {
+				if redacted, err := redactor.RedactJSON(respBodyBytes); err == nil {
+					respBodyBytes = redacted
+				}
+			}
+		}
+
 		// Parse request body as JSON if possible for cleaner storage
 		var reqBodyParsed any
-		reqBodyParsed = string(rctx.body)
-		if len(rctx.body) > 0 && rctx.body[0] == '{' {
-			reqBodyParsed = jsonRawOrString(rctx.body)
+		reqBodyParsed = string(reqBodyBytes)
+		if len(reqBodyBytes) > 0 && reqBodyBytes[0] == '{' {
+			reqBodyParsed = jsonRawOrString(reqBodyBytes)
 		}
 
 		// Parse response body as JSON if possible
 		var respBodyParsed any
-		respBodyParsed = string(respBody)
+		respBodyParsed = string(respBodyBytes)
 		contentType := resp.Header.Get("Content-Type")
 
 		if strings.Contains(contentType, "text/event-stream") {
 			// SSE streaming response — store as raw text
-			respBodyParsed = string(respBody)
-		} else if len(respBody) > 0 && respBody[0] == '{' {
-			respBodyParsed = jsonRawOrString(respBody)
+			respBodyParsed = string(respBodyBytes)
+		} else if len(respBodyBytes) > 0 && respBodyBytes[0] == '{' {
+			respBodyParsed = jsonRawOrString(respBodyBytes)
 		}
 
 		// Create LLM_REQUEST span

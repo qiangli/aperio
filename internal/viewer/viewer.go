@@ -16,6 +16,9 @@ import (
 //go:embed templates/index.html
 var viewerHTML embed.FS
 
+//go:embed templates/diff.html
+var diffHTML embed.FS
+
 // Options configures the viewer server.
 type Options struct {
 	Port      int
@@ -68,6 +71,59 @@ func Serve(opts Options) (string, error) {
 	log.Info().Str("url", url).Msg("viewer running")
 
 	// Serve in background
+	go http.Serve(listener, mux)
+
+	return url, nil
+}
+
+// DiffOptions configures the diff viewer.
+type DiffOptions struct {
+	Port       int
+	LeftFile   string
+	RightFile  string
+	DiffResult []trace.Difference
+}
+
+// ServeDiff starts a side-by-side trace diff viewer.
+func ServeDiff(opts DiffOptions) (string, error) {
+	left, err := trace.ReadTrace(opts.LeftFile)
+	if err != nil {
+		return "", fmt.Errorf("read left trace: %w", err)
+	}
+	right, err := trace.ReadTrace(opts.RightFile)
+	if err != nil {
+		return "", fmt.Errorf("read right trace: %w", err)
+	}
+
+	leftJSON, _ := json.Marshal(left)
+	rightJSON, _ := json.Marshal(right)
+	diffJSON, _ := json.Marshal(opts.DiffResult)
+
+	htmlBytes, err := diffHTML.ReadFile("templates/diff.html")
+	if err != nil {
+		return "", fmt.Errorf("read diff template: %w", err)
+	}
+
+	html := string(htmlBytes)
+	html = strings.Replace(html, "\"__LEFT_TRACE__\"", string(leftJSON), 1)
+	html = strings.Replace(html, "\"__RIGHT_TRACE__\"", string(rightJSON), 1)
+	html = strings.Replace(html, "\"__DIFF_DATA__\"", string(diffJSON), 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(html))
+	})
+
+	addr := fmt.Sprintf(":%d", opts.Port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", fmt.Errorf("listen: %w", err)
+	}
+
+	url := fmt.Sprintf("http://localhost:%d", listener.Addr().(*net.TCPAddr).Port)
+	log.Info().Str("url", url).Msg("diff viewer running")
+
 	go http.Serve(listener, mux)
 
 	return url, nil

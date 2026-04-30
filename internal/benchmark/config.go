@@ -21,6 +21,18 @@ type BenchmarkSpec struct {
 	Parallel    bool                  `yaml:"parallel" json:"parallel"`
 	OutputDir   string                `yaml:"output_dir" json:"output_dir"`
 	Pricing     map[string]ModelPrice `yaml:"pricing,omitempty" json:"pricing,omitempty"`
+
+	// Adapter-driven benchmarking (optional).
+	Adapter *AdapterSpec `yaml:"adapter,omitempty" json:"adapter,omitempty"`
+
+	// Docker isolation (optional).
+	Docker *DockerConfig `yaml:"docker,omitempty" json:"docker,omitempty"`
+
+	// Regression checking (optional).
+	Regression *RegressionConfig `yaml:"regression,omitempty" json:"regression,omitempty"`
+
+	// PassK specifies which pass@k values to compute (e.g., [1, 3, 5]).
+	PassK []int `yaml:"pass_k,omitempty" json:"pass_k,omitempty"`
 }
 
 // TaskSpec describes what the tools should accomplish.
@@ -84,6 +96,29 @@ func validateSpec(spec *BenchmarkSpec) error {
 	if spec.Name == "" {
 		return fmt.Errorf("name is required")
 	}
+
+	// Adapter-driven specs defer task/tool validation to the adapter.
+	if spec.Adapter != nil {
+		if spec.Adapter.Name == "" {
+			return fmt.Errorf("adapter.name is required")
+		}
+		if len(spec.Tools) == 0 {
+			return fmt.Errorf("at least one tool is required")
+		}
+		for i, tool := range spec.Tools {
+			if tool.Name == "" {
+				return fmt.Errorf("tools[%d].name is required", i)
+			}
+			if len(tool.Command) == 0 {
+				return fmt.Errorf("tools[%d].command is required", i)
+			}
+			if tool.Mode != "source" && tool.Mode != "blackbox" {
+				return fmt.Errorf("tools[%d].mode must be 'source' or 'blackbox', got %q", i, tool.Mode)
+			}
+		}
+		return nil
+	}
+
 	if spec.Task.Query == "" {
 		return fmt.Errorf("task.query is required")
 	}

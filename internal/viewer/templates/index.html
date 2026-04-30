@@ -46,6 +46,9 @@
     .badge-fs-write { background: #4a4a2a; color: #cccc60; }
     .badge-net-io { background: #2a3a5a; color: #80aadd; }
     .badge-db-query { background: #4a2a4a; color: #cc80cc; }
+    .badge-memory-retrieval { background: #2a4a3a; color: #60cc90; }
+    .badge-context-injection { background: #3a3a5a; color: #9090dd; }
+    .badge-vector-search { background: #4a3a2a; color: #ccaa60; }
 
     /* JSON syntax highlighting */
     .json-key { color: #e94560; }
@@ -75,6 +78,14 @@
     #timeline-header { padding: 8px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #0f3460; }
     #timeline-header h3 { font-size: 13px; color: #e94560; }
     #timeline-canvas { width: 100%; height: 220px; cursor: pointer; }
+
+    /* Flame graph panel */
+    #flame-panel { background: #16213e; border-top: 1px solid #0f3460; flex-shrink: 0; display: none; overflow: hidden; }
+    #flame-panel.visible { display: block; }
+    #flame-header { padding: 8px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #0f3460; }
+    #flame-header h3 { font-size: 13px; color: #e94560; }
+    #flame-canvas { width: 100%; height: 280px; cursor: pointer; }
+    #flame-tooltip { position: absolute; background: #1a1a2e; border: 1px solid #0f3460; padding: 6px 10px; border-radius: 4px; font-size: 11px; color: #e0e0e0; pointer-events: none; display: none; z-index: 100; }
   </style>
 </head>
 <body>
@@ -98,9 +109,11 @@
     <button class="filter-btn" data-type="FS_READ,FS_WRITE">FS</button>
     <button class="filter-btn" data-type="NET_IO">Net</button>
     <button class="filter-btn" data-type="DB_QUERY">DB</button>
+    <button class="filter-btn" data-type="MEMORY_RETRIEVAL,CONTEXT_INJECTION,VECTOR_SEARCH">Memory</button>
     <input type="text" id="search" placeholder="Search spans..." />
     <button class="filter-btn" id="toggle-stats">Stats</button>
     <button class="filter-btn" id="toggle-timeline">Timeline</button>
+    <button class="filter-btn" id="toggle-flame">Flame</button>
   </div>
 </div>
 
@@ -126,6 +139,15 @@
     <h3>Latency Timeline</h3>
   </div>
   <canvas id="timeline-canvas"></canvas>
+</div>
+
+<div id="flame-panel">
+  <div id="flame-header">
+    <h3>Flame Graph</h3>
+    <button class="filter-btn" id="flame-reset">Reset Zoom</button>
+  </div>
+  <canvas id="flame-canvas"></canvas>
+  <div id="flame-tooltip"></div>
 </div>
 
 <!-- Trace data injected by Go server -->
@@ -272,7 +294,10 @@
     'FS_READ':      { color: '#2a5a2a', shape: 'tag', borderColor: '#40aa40' },
     'FS_WRITE':     { color: '#5a5a2a', shape: 'tag', borderColor: '#aaaa40' },
     'NET_IO':       { color: '#2a4a7a', shape: 'rhomboid', borderColor: '#4080cc' },
-    'DB_QUERY':     { color: '#5a2a5a', shape: 'octagon', borderColor: '#aa40aa' },
+    'DB_QUERY':          { color: '#5a2a5a', shape: 'octagon', borderColor: '#aa40aa' },
+    'MEMORY_RETRIEVAL':  { color: '#2a6a4a', shape: 'round-pentagon', borderColor: '#40bb70' },
+    'CONTEXT_INJECTION': { color: '#3a3a7a', shape: 'round-rectangle', borderColor: '#7070cc' },
+    'VECTOR_SEARCH':     { color: '#6a5a2a', shape: 'star', borderColor: '#ccaa40' },
   };
 
   function getConfig(type) {
@@ -464,10 +489,48 @@
       html += '</div></div>';
     }
 
+    // Specialized panels for memory/context spans
+    if (span.type === 'CONTEXT_INJECTION' && span.attributes) {
+      html += '<div class="detail-section">';
+      html += '<h3>Context Injection</h3>';
+      html += '<div class="detail-value">';
+      if (span.attributes.context_type) html += 'Type: ' + escapeHtml(span.attributes.context_type) + '\n';
+      if (span.attributes.token_estimate) html += 'Est. Tokens: ' + span.attributes.token_estimate + '\n';
+      if (span.attributes.content) html += '\n' + escapeHtml(span.attributes.content);
+      html += '</div></div>';
+    }
+    if (span.type === 'VECTOR_SEARCH' && span.attributes) {
+      html += '<div class="detail-section">';
+      html += '<h3>Vector Search</h3>';
+      html += '<div class="detail-value">';
+      if (span.attributes.model) html += 'Model: ' + escapeHtml(span.attributes.model) + '\n';
+      if (span.attributes.query) html += 'Query: ' + escapeHtml(span.attributes.query) + '\n';
+      if (span.attributes.result_count !== undefined) html += 'Results: ' + span.attributes.result_count + '\n';
+      if (span.attributes.similarity_scores) {
+        html += '\nSimilarity Scores:\n';
+        const scores = Array.isArray(span.attributes.similarity_scores) ? span.attributes.similarity_scores : [];
+        scores.forEach((s, i) => {
+          const pct = (s * 100).toFixed(1);
+          html += `  ${i+1}. ${pct}%  ${'█'.repeat(Math.round(s * 20))}${'░'.repeat(20 - Math.round(s * 20))}\n`;
+        });
+      }
+      html += '</div></div>';
+    }
+    if (span.type === 'MEMORY_RETRIEVAL' && span.attributes) {
+      html += '<div class="detail-section">';
+      html += '<h3>Memory Retrieval</h3>';
+      html += '<div class="detail-value">';
+      if (span.attributes.source) html += 'Source: ' + escapeHtml(span.attributes.source) + '\n';
+      if (span.attributes.tool_name) html += 'Tool: ' + escapeHtml(span.attributes.tool_name) + '\n';
+      if (span.attributes.result_count !== undefined) html += 'Results: ' + span.attributes.result_count + '\n';
+      if (span.attributes.content) html += '\n' + escapeHtml(span.attributes.content);
+      html += '</div></div>';
+    }
+
     // Attributes
     if (span.attributes && Object.keys(span.attributes).length > 0) {
       // Show important attributes first
-      const importantKeys = ['exec.category', 'exec.subcategory', 'content', 'query', 'tool_name', 'arguments', 'return_value', 'function', 'filename', 'lineno', 'module', 'command', 'exit_code', 'stdout', 'stderr', 'path', 'size', 'operation', 'host', 'port', 'database', 'row_count', 'url', 'status_code'];
+      const importantKeys = ['exec.category', 'exec.subcategory', 'content', 'query', 'tool_name', 'arguments', 'return_value', 'function', 'filename', 'lineno', 'module', 'command', 'exit_code', 'stdout', 'stderr', 'path', 'size', 'operation', 'host', 'port', 'database', 'row_count', 'url', 'status_code', 'context_type', 'token_estimate', 'similarity_scores', 'result_count', 'source'];
       const shownKeys = new Set();
 
       for (const key of importantKeys) {
@@ -816,7 +879,174 @@
     if (timelinePanel.classList.contains('visible')) {
       renderTimeline();
     }
+    if (flamePanel.classList.contains('visible')) {
+      renderFlameGraph();
+    }
   });
+
+  // ---- Flame Graph ----
+  const flamePanel = document.getElementById('flame-panel');
+  const flameCanvas = document.getElementById('flame-canvas');
+  const flameCtx = flameCanvas ? flameCanvas.getContext('2d') : null;
+  const flameTooltip = document.getElementById('flame-tooltip');
+  let flameZoomStack = [];
+
+  document.getElementById('toggle-flame').addEventListener('click', function() {
+    this.classList.toggle('active');
+    flamePanel.classList.toggle('visible');
+    if (flamePanel.classList.contains('visible')) {
+      flameZoomStack = [];
+      renderFlameGraph();
+    }
+  });
+
+  document.getElementById('flame-reset').addEventListener('click', function() {
+    flameZoomStack = [];
+    renderFlameGraph();
+  });
+
+  function renderFlameGraph() {
+    if (!flameCtx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = flameCanvas.getBoundingClientRect();
+    flameCanvas.width = rect.width * dpr;
+    flameCanvas.height = rect.height * dpr;
+    flameCtx.scale(dpr, dpr);
+
+    const W = rect.width;
+    const H = rect.height;
+    const barH = 20;
+    const gap = 1;
+
+    flameCtx.fillStyle = '#16213e';
+    flameCtx.fillRect(0, 0, W, H);
+
+    // Build parent map and compute depths
+    const spanMap = {};
+    data.spans.forEach(s => { spanMap[s.id] = s; });
+
+    function getDepth(s) {
+      let depth = 0;
+      let current = s;
+      while (current.parent_id && spanMap[current.parent_id]) {
+        depth++;
+        current = spanMap[current.parent_id];
+      }
+      return depth;
+    }
+
+    // Find time range (respect zoom)
+    let rootSpan = null;
+    if (flameZoomStack.length > 0) {
+      rootSpan = flameZoomStack[flameZoomStack.length - 1];
+    }
+
+    const spanList = data.spans.filter(s => s.start_time && s.end_time);
+    if (spanList.length === 0) return;
+
+    let minTime, maxTime;
+    if (rootSpan) {
+      minTime = new Date(rootSpan.start_time).getTime();
+      maxTime = new Date(rootSpan.end_time).getTime();
+    } else {
+      const times = spanList.map(s => new Date(s.start_time).getTime());
+      const endTimes = spanList.map(s => new Date(s.end_time).getTime());
+      minTime = Math.min(...times);
+      maxTime = Math.max(...endTimes);
+    }
+
+    const totalDur = maxTime - minTime || 1;
+
+    // Render spans as bars
+    const flameRects = [];
+    spanList.forEach(s => {
+      const start = new Date(s.start_time).getTime();
+      const end = new Date(s.end_time).getTime();
+      const dur = end - start;
+      if (dur <= 0) return;
+      if (end < minTime || start > maxTime) return;
+
+      const depth = getDepth(s);
+      const x = Math.max(0, ((start - minTime) / totalDur) * W);
+      const w = Math.max(1, (dur / totalDur) * W);
+      const y = depth * (barH + gap);
+
+      if (y + barH > H) return;
+
+      const cfg = getConfig(s.type);
+      flameCtx.fillStyle = cfg.color;
+      flameCtx.fillRect(x, y, w, barH);
+
+      // Border
+      flameCtx.strokeStyle = cfg.borderColor;
+      flameCtx.lineWidth = 0.5;
+      flameCtx.strokeRect(x, y, w, barH);
+
+      // Label if wide enough
+      if (w > 40) {
+        flameCtx.fillStyle = '#e0e0e0';
+        flameCtx.font = '10px monospace';
+        const label = s.name.length > w / 6 ? s.name.substring(0, Math.floor(w / 6)) + '...' : s.name;
+        flameCtx.fillText(label, x + 3, y + 14);
+      }
+
+      flameRects.push({ x, y, w, h: barH, span: s });
+    });
+
+    // Store for click/hover
+    flameCanvas._rects = flameRects;
+  }
+
+  if (flameCanvas) {
+    flameCanvas.addEventListener('mousemove', function(e) {
+      const rect = flameCanvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const rects = flameCanvas._rects || [];
+
+      let found = null;
+      for (const r of rects) {
+        if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) {
+          found = r;
+          break;
+        }
+      }
+
+      if (found) {
+        const s = found.span;
+        const dur = new Date(s.end_time) - new Date(s.start_time);
+        flameTooltip.style.display = 'block';
+        flameTooltip.style.left = (e.clientX + 10) + 'px';
+        flameTooltip.style.top = (e.clientY - 30) + 'px';
+        flameTooltip.innerHTML = `<strong>${escapeHtml(s.name)}</strong><br>${s.type} — ${dur}ms`;
+        flameCanvas.style.cursor = 'pointer';
+      } else {
+        flameTooltip.style.display = 'none';
+        flameCanvas.style.cursor = 'default';
+      }
+    });
+
+    flameCanvas.addEventListener('mouseleave', function() {
+      flameTooltip.style.display = 'none';
+    });
+
+    flameCanvas.addEventListener('click', function(e) {
+      const rect = flameCanvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const rects = flameCanvas._rects || [];
+
+      for (const r of rects) {
+        if (mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h) {
+          flameZoomStack.push(r.span);
+          renderFlameGraph();
+          showDetail(r.span);
+          return;
+        }
+      }
+    });
+  }
 
 })();
 </script>

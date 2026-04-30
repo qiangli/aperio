@@ -40,6 +40,14 @@ type TraceMetrics struct {
 	// Reliability
 	ErrorCount int `json:"error_count"`
 
+	// Memory/Context
+	MemoryRetrievalCount  int `json:"memory_retrieval_count"`
+	ContextInjectionCount int `json:"context_injection_count"`
+	VectorSearchCount     int `json:"vector_search_count"`
+
+	// pass@k metrics (computed from multiple runs)
+	PassAtK map[int]float64 `json:"pass_at_k,omitempty"`
+
 	// Per-model breakdown
 	ModelUsage map[string]ModelMetrics `json:"model_usage"`
 
@@ -123,6 +131,15 @@ func Extract(t *trace.Trace, pricing PricingTable) *TraceMetrics {
 			if exitCode != 0 {
 				m.ErrorCount++
 			}
+
+		case trace.SpanMemoryRetrieval:
+			m.MemoryRetrievalCount++
+
+		case trace.SpanContextInjection:
+			m.ContextInjectionCount++
+
+		case trace.SpanVectorSearch:
+			m.VectorSearchCount++
 		}
 	}
 
@@ -186,6 +203,9 @@ func AverageMetrics(metrics []*TraceMetrics) *TraceMetrics {
 		avg.TotalBytesIO += m.TotalBytesIO
 		avg.PassRate += m.PassRate
 		avg.ErrorCount += m.ErrorCount
+		avg.MemoryRetrievalCount += m.MemoryRetrievalCount
+		avg.ContextInjectionCount += m.ContextInjectionCount
+		avg.VectorSearchCount += m.VectorSearchCount
 	}
 
 	avg.TotalDurationMs = int64(float64(avg.TotalDurationMs) / n)
@@ -204,6 +224,9 @@ func AverageMetrics(metrics []*TraceMetrics) *TraceMetrics {
 	avg.TotalBytesIO = int64(float64(avg.TotalBytesIO) / n)
 	avg.PassRate /= n
 	avg.ErrorCount = int(float64(avg.ErrorCount) / n)
+	avg.MemoryRetrievalCount = int(float64(avg.MemoryRetrievalCount) / n)
+	avg.ContextInjectionCount = int(float64(avg.ContextInjectionCount) / n)
+	avg.VectorSearchCount = int(float64(avg.VectorSearchCount) / n)
 
 	return avg
 }
