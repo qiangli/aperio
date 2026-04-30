@@ -1,0 +1,23 @@
+name: "validation-test"
+description: "Dry-run validation of benchmark pipeline"
+runs: 1
+output_dir: "/tmp/aperio-bench-validation"
+
+task:
+  query: "Create a hello world function"
+  working_dir: "/tmp/aperio-bench-workspace"
+  setup_cmd: "mkdir -p /tmp/aperio-bench-workspace"
+  cleanup_cmd: "rm -rf /tmp/aperio-bench-workspace"
+  timeout: "30s"
+  validation:
+    - type: exit_code
+      expect: "0"
+
+tools:
+  - name: echo-tool-a
+    command: ["sh", "-c", "echo '{{.Query}}' && sleep 0.1"]
+    mode: blackbox
+
+  - name: echo-tool-b
+    command: ["sh", "-c", "echo '{{.Query}}' && sleep 0.2"]
+    mode: blackbox

@@ -190,7 +190,9 @@ func runSourceMode(ctx context.Context, command []string, tool *ToolSpec, spec *
 func runShellCmd(ctx context.Context, command, workDir string) error {
 	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	if workDir != "" {
-		cmd.Dir = workDir
+		if _, err := os.Stat(workDir); err == nil {
+			cmd.Dir = workDir
+		}
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
