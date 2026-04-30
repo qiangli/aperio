@@ -20,6 +20,9 @@ const (
 	SpanFSWrite     SpanType = "FS_WRITE"    // filesystem write
 	SpanNetIO       SpanType = "NET_IO"      // network I/O (TCP/HTTP/gRPC)
 	SpanDBQuery     SpanType = "DB_QUERY"    // database query
+	SpanProcess     SpanType = "PROCESS"     // agent process lifetime (multi-agent root)
+	SpanGoroutine   SpanType = "GOROUTINE"   // Go goroutine lifetime
+	SpanGC          SpanType = "GC"          // Go garbage collection
 )
 
 // Span represents a single unit of work in an execution trace.
@@ -35,9 +38,13 @@ type Span struct {
 
 // Metadata holds contextual information about the trace.
 type Metadata struct {
-	Command    string `json:"command"`
-	Language   string `json:"language"`
-	WorkingDir string `json:"working_dir"`
+	Command       string `json:"command"`
+	Language      string `json:"language"`
+	WorkingDir    string `json:"working_dir"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	ParentTraceID string `json:"parent_trace_id,omitempty"`
+	ParentSpanID  string `json:"parent_span_id,omitempty"`
+	AgentRole     string `json:"agent_role,omitempty"`
 }
 
 // Trace represents a complete execution trace of an agent session.

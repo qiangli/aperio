@@ -43,6 +43,8 @@ type Options struct {
 	RecordedTrace *trace.Trace
 	Strict        bool
 	MatchStrategy string
+	CassettePath  string // Load replay data from YAML cassette file
+	Normalize     bool   // Normalize responses before comparison
 }
 
 // New creates a new proxy instance.

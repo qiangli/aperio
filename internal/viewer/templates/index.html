@@ -55,6 +55,26 @@
     .json-null { color: #888; }
 
     #empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #555; font-size: 14px; }
+
+    /* Stats bar */
+    #stats-bar { background: #16213e; border-bottom: 1px solid #0f3460; flex-shrink: 0; overflow: hidden; transition: max-height 0.3s ease; }
+    #stats-bar.collapsed { max-height: 0 !important; border-bottom: none; }
+    #stats-summary { display: flex; gap: 24px; padding: 10px 20px; flex-wrap: wrap; align-items: center; }
+    .stat-item { font-size: 12px; color: #aaa; }
+    .stat-item .stat-val { color: #e0e0e0; font-weight: 600; }
+    .stat-item .stat-cost { color: #ff9f43; font-weight: 600; }
+    #stats-breakdown { padding: 0 20px 10px 20px; }
+    #stats-breakdown table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #stats-breakdown th { text-align: left; color: #888; font-weight: 600; padding: 4px 8px; border-bottom: 1px solid #0f3460; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+    #stats-breakdown td { padding: 4px 8px; color: #ccc; border-bottom: 1px solid #0a0a1a; }
+    #stats-breakdown td.num { text-align: right; font-family: 'Fira Code', monospace; }
+
+    /* Timeline panel */
+    #timeline-panel { background: #16213e; border-top: 1px solid #0f3460; flex-shrink: 0; display: none; overflow: hidden; }
+    #timeline-panel.visible { display: block; }
+    #timeline-header { padding: 8px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #0f3460; }
+    #timeline-header h3 { font-size: 13px; color: #e94560; }
+    #timeline-canvas { width: 100%; height: 220px; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -79,7 +99,14 @@
     <button class="filter-btn" data-type="NET_IO">Net</button>
     <button class="filter-btn" data-type="DB_QUERY">DB</button>
     <input type="text" id="search" placeholder="Search spans..." />
+    <button class="filter-btn" id="toggle-stats">Stats</button>
+    <button class="filter-btn" id="toggle-timeline">Timeline</button>
   </div>
+</div>
+
+<div id="stats-bar" class="collapsed">
+  <div id="stats-summary"></div>
+  <div id="stats-breakdown"></div>
 </div>
 
 <div id="main">
@@ -94,6 +121,13 @@
   </div>
 </div>
 
+<div id="timeline-panel">
+  <div id="timeline-header">
+    <h3>Latency Timeline</h3>
+  </div>
+  <canvas id="timeline-canvas"></canvas>
+</div>
+
 <!-- Trace data injected by Go server -->
 <script id="trace-data">
   // APERIO_TRACE_DATA_PLACEHOLDER
@@ -105,11 +139,125 @@
   const trace = TRACE_DATA;
   const spans = trace.spans || [];
 
+  // Model pricing table (per 1K tokens)
+  const MODEL_PRICING = {
+    'gpt-4': { input: 0.03, output: 0.06 },
+    'gpt-4-turbo': { input: 0.01, output: 0.03 },
+    'gpt-4o': { input: 0.005, output: 0.015 },
+    'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
+    'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
+    'claude-3-opus': { input: 0.015, output: 0.075 },
+    'claude-sonnet-4': { input: 0.003, output: 0.015 },
+    'claude-3.5-sonnet': { input: 0.003, output: 0.015 },
+    'claude-3-haiku': { input: 0.00025, output: 0.00125 },
+  };
+
+  function matchModelPricing(modelName) {
+    if (!modelName) return null;
+    const lower = modelName.toLowerCase();
+    // Sort keys longest-first for most specific match
+    const keys = Object.keys(MODEL_PRICING).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      if (lower.startsWith(key)) return MODEL_PRICING[key];
+    }
+    return null;
+  }
+
+  function matchModelKey(modelName) {
+    if (!modelName) return null;
+    const lower = modelName.toLowerCase();
+    const keys = Object.keys(MODEL_PRICING).sort((a, b) => b.length - a.length);
+    for (const key of keys) {
+      if (lower.startsWith(key)) return key;
+    }
+    return null;
+  }
+
+  function computeSpanCost(span) {
+    if (span.type !== 'LLM_REQUEST' || !span.attributes) return 0;
+    const model = span.attributes['llm.model'] || '';
+    const pricing = matchModelPricing(model);
+    if (!pricing) return 0;
+    const promptTokens = Number(span.attributes['llm.token_count.prompt'] || 0);
+    const completionTokens = Number(span.attributes['llm.token_count.completion'] || 0);
+    return (promptTokens / 1000) * pricing.input + (completionTokens / 1000) * pricing.output;
+  }
+
+  function formatCost(cost) {
+    if (cost < 0.01) return '$' + cost.toFixed(4);
+    return '$' + cost.toFixed(3);
+  }
+
   // Populate metadata
   document.getElementById('meta-command').textContent = (trace.metadata && trace.metadata.command) || '';
   document.getElementById('meta-language').textContent = (trace.metadata && trace.metadata.language) || '';
   document.getElementById('meta-spans').textContent = spans.length;
   document.getElementById('meta-time').textContent = trace.created_at ? new Date(trace.created_at).toLocaleString() : '';
+
+  // Compute stats
+  (function buildStats() {
+    let totalInput = 0, totalOutput = 0, totalCost = 0, llmCalls = 0, totalLatency = 0;
+    const perModel = {};
+
+    spans.forEach(s => {
+      if (s.type !== 'LLM_REQUEST' || !s.attributes) return;
+      llmCalls++;
+      const prompt = Number(s.attributes['llm.token_count.prompt'] || 0);
+      const completion = Number(s.attributes['llm.token_count.completion'] || 0);
+      totalInput += prompt;
+      totalOutput += completion;
+
+      if (s.start_time && s.end_time) {
+        totalLatency += new Date(s.end_time) - new Date(s.start_time);
+      }
+
+      const cost = computeSpanCost(s);
+      totalCost += cost;
+
+      const modelRaw = s.attributes['llm.model'] || 'unknown';
+      const key = matchModelKey(modelRaw) || modelRaw;
+      if (!perModel[key]) perModel[key] = { calls: 0, input: 0, output: 0, cost: 0 };
+      perModel[key].calls++;
+      perModel[key].input += prompt;
+      perModel[key].output += completion;
+      perModel[key].cost += cost;
+    });
+
+    if (llmCalls === 0) return;
+
+    const avgLatency = llmCalls > 0 ? Math.round(totalLatency / llmCalls) : 0;
+    const summaryEl = document.getElementById('stats-summary');
+    summaryEl.innerHTML =
+      `<div class="stat-item">Input Tokens: <span class="stat-val">${totalInput.toLocaleString()}</span></div>` +
+      `<div class="stat-item">Output Tokens: <span class="stat-val">${totalOutput.toLocaleString()}</span></div>` +
+      `<div class="stat-item">Total Tokens: <span class="stat-val">${(totalInput + totalOutput).toLocaleString()}</span></div>` +
+      `<div class="stat-item">Est. Cost: <span class="stat-cost">${formatCost(totalCost)}</span></div>` +
+      `<div class="stat-item">LLM Calls: <span class="stat-val">${llmCalls}</span></div>` +
+      `<div class="stat-item">Avg Latency: <span class="stat-val">${avgLatency}ms</span></div>` +
+      (isMultiAgent ? `<div class="stat-item">Agents: <span class="stat-val">${agentRoles.size}</span></div>` +
+      `<div class="stat-item">Roles: <span class="stat-val">${Array.from(agentRoles).join(', ')}</span></div>` : '');
+
+    const models = Object.keys(perModel).sort();
+    if (models.length > 0) {
+      let tableHtml = '<table><thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Total</th><th>Cost</th></tr></thead><tbody>';
+      models.forEach(m => {
+        const d = perModel[m];
+        tableHtml += `<tr><td>${m}</td><td class="num">${d.calls}</td><td class="num">${d.input.toLocaleString()}</td><td class="num">${d.output.toLocaleString()}</td><td class="num">${(d.input + d.output).toLocaleString()}</td><td class="num" style="color:#ff9f43">${formatCost(d.cost)}</td></tr>`;
+      });
+      tableHtml += '</tbody></table>';
+      document.getElementById('stats-breakdown').innerHTML = tableHtml;
+    }
+  })();
+
+  // Stats toggle
+  document.getElementById('toggle-stats').addEventListener('click', function() {
+    const bar = document.getElementById('stats-bar');
+    this.classList.toggle('active');
+    bar.classList.toggle('collapsed');
+    if (!bar.classList.contains('collapsed')) {
+      bar.style.maxHeight = bar.scrollHeight + 'px';
+    }
+  });
 
   // Color and shape mapping
   const typeConfig = {
@@ -142,21 +290,50 @@
   const spanMap = {};
   spans.forEach(s => { spanMap[s.id] = s; });
 
+  // Multi-agent detection
+  const agentRoles = new Set();
+  const agentSources = new Set();
+  spans.forEach(s => {
+    if (s.attributes) {
+      if (s.attributes['agent.role']) agentRoles.add(s.attributes['agent.role']);
+      if (s.attributes['agent.source_trace']) agentSources.add(s.attributes['agent.source_trace']);
+    }
+  });
+  const isMultiAgent = agentRoles.size > 1 || agentSources.size > 1;
+  const agentPalette = ['#e94560','#4fc3f7','#66bb6a','#ffa726','#ab47bc','#26c6da','#ef5350','#8d6e63'];
+  const agentColorMap = {};
+  Array.from(agentRoles).forEach((role, i) => {
+    agentColorMap[role] = agentPalette[i % agentPalette.length];
+  });
+
   spans.forEach(s => {
     const cfg = getConfig(s.type);
+    let nodeLabel = truncateLabel(s.name, 40);
+    // Annotate LLM_REQUEST nodes with cost
+    if (s.type === 'LLM_REQUEST') {
+      const cost = computeSpanCost(s);
+      if (cost > 0) {
+        nodeLabel += '\n' + formatCost(cost);
+      }
+    }
+    const nodeStyle = {
+      'background-color': cfg.color,
+      'shape': cfg.shape,
+      'border-color': cfg.borderColor,
+      'border-width': 2,
+    };
+    if (isMultiAgent && s.attributes && s.attributes['agent.role'] && agentColorMap[s.attributes['agent.role']]) {
+      nodeStyle['border-color'] = agentColorMap[s.attributes['agent.role']];
+      nodeStyle['border-width'] = 4;
+    }
     elements.push({
       data: {
         id: s.id,
-        label: truncateLabel(s.name, 40),
+        label: nodeLabel,
         type: s.type,
         spanData: s,
       },
-      style: {
-        'background-color': cfg.color,
-        'shape': cfg.shape,
-        'border-color': cfg.borderColor,
-        'border-width': 2,
-      }
+      style: nodeStyle,
     });
 
     if (s.parent_id && spanMap[s.parent_id]) {
@@ -266,6 +443,10 @@
     // Header
     html += '<div class="detail-section">';
     html += `<span class="badge ${badgeClass}">${span.type}</span>`;
+    if (span.attributes && span.attributes['agent.role'] && agentColorMap[span.attributes['agent.role']]) {
+      const roleColor = agentColorMap[span.attributes['agent.role']];
+      html += ` <span class="badge" style="background:${roleColor}22;color:${roleColor};border:1px solid ${roleColor};">${escapeHtml(span.attributes['agent.role'])}</span>`;
+    }
     html += `<h3 style="margin-top: 8px; color: #e0e0e0; font-size: 14px; text-transform: none;">${escapeHtml(span.name)}</h3>`;
     html += '</div>';
 
@@ -363,11 +544,96 @@
     return div.innerHTML;
   }
 
+  // Multi-agent filter buttons and legend
+  let activeAgentFilter = null;
+  if (isMultiAgent) {
+    const filterBar = document.querySelector('.filter-bar');
+    // Add separator
+    const sep = document.createElement('span');
+    sep.textContent = '|';
+    sep.style.cssText = 'color: #555; font-size: 14px; margin: 0 2px;';
+    filterBar.insertBefore(sep, document.getElementById('search'));
+
+    // Add agent filter buttons
+    Array.from(agentRoles).forEach(role => {
+      const btn = document.createElement('button');
+      btn.className = 'filter-btn';
+      btn.dataset.agentRole = role;
+      btn.textContent = role;
+      btn.style.borderLeft = '3px solid ' + agentColorMap[role];
+      btn.addEventListener('click', () => {
+        if (btn.classList.contains('active')) {
+          btn.classList.remove('active');
+          activeAgentFilter = null;
+        } else {
+          document.querySelectorAll('.filter-btn[data-agent-role]').forEach(b => b.classList.remove('active'));
+          btn.classList.add('active');
+          activeAgentFilter = role;
+        }
+        applyFilters();
+      });
+      filterBar.insertBefore(btn, document.getElementById('search'));
+    });
+
+    // Agent color legend below filter bar
+    const legend = document.createElement('div');
+    legend.id = 'agent-legend';
+    legend.style.cssText = 'background: #16213e; padding: 4px 20px; display: flex; gap: 16px; align-items: center; border-bottom: 1px solid #0f3460; font-size: 11px; color: #888; flex-shrink: 0;';
+    let legendHtml = '<span style="color:#888;">Agent Legend:</span>';
+    Array.from(agentRoles).forEach(role => {
+      legendHtml += `<span style="display:inline-flex;align-items:center;gap:4px;"><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:${agentColorMap[role]};"></span><span style="color:#ccc;">${role}</span></span>`;
+    });
+    legend.innerHTML = legendHtml;
+    const statsBar = document.getElementById('stats-bar');
+    statsBar.parentNode.insertBefore(legend, statsBar.nextSibling);
+  }
+
+  function applyFilters() {
+    const activeTypeBtn = document.querySelector('.filter-btn[data-type].active');
+    const typeFilters = activeTypeBtn ? activeTypeBtn.dataset.type.split(',') : ['all'];
+    const isAllTypes = typeFilters.includes('all');
+
+    cy.elements().removeClass('dimmed');
+    cy.nodes().forEach(node => {
+      const span = node.data('spanData');
+      const nodeType = node.data('type');
+      let typeMatch = isAllTypes;
+      if (!isAllTypes) {
+        for (const filter of typeFilters) {
+          if (filter.includes(':')) {
+            const [type, category] = filter.split(':');
+            if (nodeType === type && span.attributes && span.attributes['exec.category'] === category) typeMatch = true;
+          } else {
+            if (nodeType === filter) typeMatch = true;
+          }
+        }
+      }
+
+      let agentMatch = true;
+      if (activeAgentFilter) {
+        agentMatch = span.attributes && span.attributes['agent.role'] === activeAgentFilter;
+      }
+
+      if (typeMatch && agentMatch) {
+        node.show();
+        node.connectedEdges().show();
+        node.removeClass('dimmed');
+      } else {
+        node.addClass('dimmed');
+      }
+    });
+  }
+
   // Filter buttons
-  document.querySelectorAll('.filter-btn').forEach(btn => {
+  document.querySelectorAll('.filter-btn[data-type]').forEach(btn => {
     btn.addEventListener('click', () => {
-      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.filter-btn[data-type]').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
+
+      if (isMultiAgent) {
+        applyFilters();
+        return;
+      }
 
       const filters = btn.dataset.type.split(',');
       cy.elements().removeClass('dimmed');
@@ -421,6 +687,135 @@
         node.addClass('dimmed');
       }
     });
+  });
+
+  // --- Timeline / Gantt Chart ---
+  const timelinePanel = document.getElementById('timeline-panel');
+  const timelineCanvas = document.getElementById('timeline-canvas');
+  const timelineCtx = timelineCanvas ? timelineCanvas.getContext('2d') : null;
+  let timelineSpans = []; // filtered spans used for rendering
+
+  document.getElementById('toggle-timeline').addEventListener('click', function() {
+    this.classList.toggle('active');
+    timelinePanel.classList.toggle('visible');
+    if (timelinePanel.classList.contains('visible')) {
+      renderTimeline();
+    }
+  });
+
+  function renderTimeline() {
+    if (!timelineCtx) return;
+    const canvas = timelineCanvas;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    timelineCtx.scale(dpr, dpr);
+    const W = rect.width;
+    const H = rect.height;
+
+    timelineCtx.clearRect(0, 0, W, H);
+    timelineCtx.fillStyle = '#16213e';
+    timelineCtx.fillRect(0, 0, W, H);
+
+    // Filter spans with meaningful duration
+    timelineSpans = spans.filter(s => {
+      if (!s.start_time || !s.end_time) return false;
+      const dur = new Date(s.end_time) - new Date(s.start_time);
+      return dur > 0;
+    }).sort((a, b) => new Date(a.start_time) - new Date(b.start_time));
+
+    if (timelineSpans.length === 0) {
+      timelineCtx.fillStyle = '#555';
+      timelineCtx.font = '13px sans-serif';
+      timelineCtx.textAlign = 'center';
+      timelineCtx.fillText('No spans with duration to display', W / 2, H / 2);
+      return;
+    }
+
+    const traceStart = Math.min(...timelineSpans.map(s => new Date(s.start_time).getTime()));
+    const traceEnd = Math.max(...timelineSpans.map(s => new Date(s.end_time).getTime()));
+    const traceDuration = traceEnd - traceStart || 1;
+
+    const labelWidth = 160;
+    const padding = { top: 30, right: 20, bottom: 20, left: labelWidth };
+    const chartW = W - padding.left - padding.right;
+    const barHeight = 16;
+    const barGap = 4;
+    const rowHeight = barHeight + barGap;
+    const maxVisibleRows = Math.floor((H - padding.top - padding.bottom) / rowHeight);
+    const visibleSpans = timelineSpans.slice(0, maxVisibleRows);
+
+    // Draw time axis
+    timelineCtx.strokeStyle = '#333355';
+    timelineCtx.fillStyle = '#888';
+    timelineCtx.font = '10px monospace';
+    timelineCtx.textAlign = 'center';
+    const tickCount = 6;
+    for (let i = 0; i <= tickCount; i++) {
+      const x = padding.left + (chartW * i / tickCount);
+      const t = (traceDuration * i / tickCount);
+      timelineCtx.beginPath();
+      timelineCtx.moveTo(x, padding.top - 5);
+      timelineCtx.lineTo(x, padding.top + visibleSpans.length * rowHeight);
+      timelineCtx.stroke();
+      let label;
+      if (t < 1000) label = Math.round(t) + 'ms';
+      else label = (t / 1000).toFixed(1) + 's';
+      timelineCtx.fillText(label, x, padding.top - 10);
+    }
+
+    // Draw bars
+    visibleSpans.forEach((s, i) => {
+      const start = new Date(s.start_time).getTime() - traceStart;
+      const dur = new Date(s.end_time).getTime() - new Date(s.start_time).getTime();
+      const x = padding.left + (start / traceDuration) * chartW;
+      const w = Math.max(2, (dur / traceDuration) * chartW);
+      const y = padding.top + i * rowHeight;
+      const cfg = getConfig(s.type);
+
+      // Bar
+      timelineCtx.fillStyle = cfg.borderColor || cfg.color;
+      timelineCtx.fillRect(x, y, w, barHeight);
+
+      // Label (left side)
+      timelineCtx.fillStyle = '#ccc';
+      timelineCtx.font = '11px monospace';
+      timelineCtx.textAlign = 'right';
+      const spanLabel = (s.name || '?').substring(0, 22);
+      timelineCtx.fillText(spanLabel, padding.left - 6, y + barHeight - 3);
+    });
+  }
+
+  // Handle timeline click -> select Cytoscape node
+  if (timelineCanvas) {
+    timelineCanvas.addEventListener('click', function(e) {
+      if (timelineSpans.length === 0) return;
+      const rect = timelineCanvas.getBoundingClientRect();
+      const clickY = e.clientY - rect.top;
+      const barHeight = 16, barGap = 4, rowHeight = barHeight + barGap;
+      const paddingTop = 30;
+      const idx = Math.floor((clickY - paddingTop) / rowHeight);
+      if (idx < 0 || idx >= timelineSpans.length) return;
+      const span = timelineSpans[idx];
+      const node = cy.getElementById(span.id);
+      if (node && node.length) {
+        cy.elements().removeClass('highlighted dimmed');
+        const neighborhood = node.closedNeighborhood();
+        cy.elements().not(neighborhood).addClass('dimmed');
+        neighborhood.addClass('highlighted');
+        node.select();
+        cy.animate({ center: { eles: node }, duration: 300 });
+        showDetail(span);
+      }
+    });
+  }
+
+  // Re-render timeline on resize
+  window.addEventListener('resize', function() {
+    if (timelinePanel.classList.contains('visible')) {
+      renderTimeline();
+    }
   });
 
 })();

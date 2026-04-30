@@ -39,6 +39,25 @@ func FormatText(r *EvalResult, verbose bool) string {
 
 	fmt.Fprintf(&b, "Edit Distance: %.2f (max possible: %.2f)\n", r.EditDistance, r.MaxDistance)
 
+	if r.SemanticScores != nil && len(r.SemanticScores.PairScores) > 0 {
+		fmt.Fprintf(&b, "\nSemantic Similarity:\n")
+		agg := r.SemanticScores.Aggregate
+		fmt.Fprintf(&b, "  BLEU:       %.3f\n", agg.BLEU)
+		fmt.Fprintf(&b, "  ROUGE-1:    %.3f\n", agg.ROUGE1)
+		fmt.Fprintf(&b, "  ROUGE-2:    %.3f\n", agg.ROUGE2)
+		fmt.Fprintf(&b, "  ROUGE-L:    %.3f\n", agg.ROUGEL)
+		fmt.Fprintf(&b, "  Levenshtein: %.3f\n", agg.LevenshteinSim)
+		fmt.Fprintf(&b, "  Cosine:     %.3f\n", agg.CosineSimilarity)
+
+		if verbose {
+			fmt.Fprintf(&b, "\n  Per-Pair Scores (%d pairs):\n", len(r.SemanticScores.PairScores))
+			for _, p := range r.SemanticScores.PairScores {
+				fmt.Fprintf(&b, "    %s: BLEU=%.3f ROUGE-L=%.3f Cosine=%.3f\n",
+					p.LeftSpan, p.Metrics.BLEU, p.Metrics.ROUGEL, p.Metrics.CosineSimilarity)
+			}
+		}
+	}
+
 	if verbose && len(r.EditScript) > 0 {
 		fmt.Fprintf(&b, "\nEdit Script (%d operations):\n", len(r.EditScript))
 		for _, op := range r.EditScript {

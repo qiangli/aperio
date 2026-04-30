@@ -16,6 +16,7 @@ type EvalResult struct {
 	MaxDistance           float64                  `json:"max_distance"`
 	TypeBreakdown        map[string]TypeEvalResult `json:"type_breakdown"`
 	EditScript           []EditOperation           `json:"edit_script"`
+	SemanticScores       *SemanticEvalResult       `json:"semantic_scores,omitempty"`
 }
 
 // TypeEvalResult shows per-type evaluation details.
@@ -40,7 +41,8 @@ type EditOperation struct {
 
 // EvalConfig configures the evaluation.
 type EvalConfig struct {
-	BehavioralOnly bool
+	BehavioralOnly         bool
+	IncludeSemanticMetrics bool
 }
 
 // Behavioral span types that form the "behavioral spine".
@@ -100,6 +102,11 @@ func Evaluate(left, right *trace.TraceGraph, cfg *EvalConfig) *EvalResult {
 	behavDist, _ := zhangShasha(behavLeftTree, behavRightTree, costFn)
 	behavMax := maxDistance(behavLeftTree, behavRightTree, costFn)
 	result.BehavioralSimilarity = normalizeSimilarity(behavDist, behavMax)
+
+	// Semantic similarity: text metrics on matched output spans
+	if cfg.IncludeSemanticMetrics {
+		result.SemanticScores = EvaluateSemantic(left, right, result.EditScript)
+	}
 
 	return result
 }

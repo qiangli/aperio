@@ -33,6 +33,15 @@ type RecordOptions struct {
 
 	// ExcludePatterns for function tracing.
 	ExcludePatterns []string
+
+	// GoTracerBackend selects the Go tracer: "dlv" (default) or "runtime".
+	GoTracerBackend string
+
+	// CorrelationID links traces across multiple agents. Auto-generated if empty.
+	CorrelationID string
+
+	// AgentRole labels this agent's role (e.g., "orchestrator", "coder").
+	AgentRole string
 }
 
 // ReplayOptions configures a replay session.
@@ -49,8 +58,11 @@ type ReplayOptions struct {
 	// Strict fails on unmatched requests.
 	Strict bool
 
-	// MatchStrategy is "sequential" or "fingerprint".
+	// MatchStrategy is "sequential", "fingerprint", or "body".
 	MatchStrategy string
+
+	// CassettePath loads replay data from YAML cassette file.
+	CassettePath string
 
 	// WorkingDir is the agent's working directory.
 	WorkingDir string
@@ -69,6 +81,21 @@ func Record(ctx context.Context, opts RecordOptions) error {
 	if opts.OutputPath == "" {
 		opts.OutputPath = fmt.Sprintf("trace-%s.json", time.Now().Format("20060102-150405"))
 	}
+
+	// Multi-agent correlation: read or generate correlation context
+	correlationID := opts.CorrelationID
+	if correlationID == "" {
+		correlationID = os.Getenv("APERIO_TRACE_ID")
+	}
+	if correlationID == "" {
+		correlationID = uuid.New().String()
+	}
+	parentTraceID := os.Getenv("APERIO_PARENT_TRACE_ID")
+	parentSpanID := os.Getenv("APERIO_PARENT_SPAN_ID")
+
+	// Create a PROCESS root span for this agent
+	processSpanID := uuid.New().String()
+	recordStart := time.Now()
 
 	lang := DetectLanguage(opts.Command)
 
@@ -123,7 +150,11 @@ func Record(ctx context.Context, opts RecordOptions) error {
 		}
 		t = nt
 	case LangGo:
-		t = tracer.NewGoTracer()
+		if opts.GoTracerBackend == "runtime" {
+			t = tracer.NewGoRuntimeTracer()
+		} else {
+			t = tracer.NewGoTracer()
+		}
 	default:
 		log.Warn().Str("language", string(lang)).Msg("no tracer available for language, recording API calls only")
 	}
@@ -156,6 +187,10 @@ func Record(ctx context.Context, opts RecordOptions) error {
 		fmt.Sprintf("https_proxy=%s", proxyURL),
 		// Also set provider-specific base URLs as fallback
 		fmt.Sprintf("OPENAI_BASE_URL=http://127.0.0.1:%d/v1", p.Port()),
+		// Multi-agent correlation context
+		fmt.Sprintf("APERIO_TRACE_ID=%s", correlationID),
+		fmt.Sprintf("APERIO_PARENT_TRACE_ID=%s", correlationID),
+		fmt.Sprintf("APERIO_PARENT_SPAN_ID=%s", processSpanID),
 	)
 	env = append(env, tracerEnv...)
 
@@ -193,13 +228,40 @@ func Record(ctx context.Context, opts RecordOptions) error {
 	// Merge and enrich
 	allSpans := trace.Merge(apiSpans, funcSpans)
 
+	// Create PROCESS root span encompassing the entire agent execution
+	processSpan := &trace.Span{
+		ID:        processSpanID,
+		ParentID:  parentSpanID,
+		Type:      trace.SpanProcess,
+		Name:      strings.Join(opts.Command, " "),
+		StartTime: recordStart,
+		EndTime:   time.Now(),
+		Attributes: map[string]any{
+			"agent.role":      opts.AgentRole,
+			"correlation.id":  correlationID,
+			"process.command": strings.Join(opts.Command, " "),
+		},
+	}
+
+	// Re-parent root spans under the PROCESS span
+	for _, s := range allSpans {
+		if s.ParentID == "" {
+			s.ParentID = processSpanID
+		}
+	}
+	allSpans = append([]*trace.Span{processSpan}, allSpans...)
+
 	result := &trace.Trace{
 		ID:        uuid.New().String(),
 		CreatedAt: time.Now(),
 		Metadata: trace.Metadata{
-			Command:    strings.Join(opts.Command, " "),
-			Language:   string(lang),
-			WorkingDir: opts.WorkingDir,
+			Command:       strings.Join(opts.Command, " "),
+			Language:      string(lang),
+			WorkingDir:    opts.WorkingDir,
+			CorrelationID: correlationID,
+			ParentTraceID: parentTraceID,
+			ParentSpanID:  parentSpanID,
+			AgentRole:     opts.AgentRole,
 		},
 		Spans: allSpans,
 	}
@@ -268,6 +330,7 @@ func Replay(ctx context.Context, opts ReplayOptions) error {
 		RecordedTrace: recorded,
 		Strict:        opts.Strict,
 		MatchStrategy: opts.MatchStrategy,
+		CassettePath:  opts.CassettePath,
 	})
 	if err != nil {
 		return fmt.Errorf("start replay proxy: %w", err)

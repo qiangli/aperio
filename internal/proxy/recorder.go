@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -41,6 +43,25 @@ func setupRecorder(p *Proxy, server *goproxy.ProxyHttpServer, targets []string) 
 				return req, nil
 			}
 			req.Body = io.NopCloser(bytes.NewReader(body))
+		}
+
+		// Inject multi-agent correlation headers
+		if traceID := os.Getenv("APERIO_TRACE_ID"); traceID != "" {
+			req.Header.Set("X-Aperio-Trace-ID", traceID)
+			if parentSpanID := os.Getenv("APERIO_PARENT_SPAN_ID"); parentSpanID != "" {
+				req.Header.Set("X-Aperio-Parent-Span-ID", parentSpanID)
+			}
+			// W3C traceparent for OTEL interop
+			spanID := uuid.New().String()
+			traceHex := strings.ReplaceAll(traceID, "-", "")
+			if len(traceHex) > 32 {
+				traceHex = traceHex[:32]
+			}
+			spanHex := strings.ReplaceAll(spanID, "-", "")
+			if len(spanHex) > 16 {
+				spanHex = spanHex[len(spanHex)-16:]
+			}
+			req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", traceHex, spanHex))
 		}
 
 		// Capture headers (strip authorization)

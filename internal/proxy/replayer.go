@@ -87,12 +87,22 @@ type matcher struct {
 type matchEntry struct {
 	method   string
 	url      string
+	body     []byte
 	response *recordedResponse
 }
 
 func newMatcher(opts Options) *matcher {
 	m := &matcher{
 		strategy: opts.MatchStrategy,
+	}
+
+	// Load from cassette if provided
+	if opts.CassettePath != "" {
+		entries, err := ReadCassette(opts.CassettePath)
+		if err == nil {
+			m.responses = entries
+		}
+		return m
 	}
 
 	if opts.RecordedTrace == nil {
@@ -134,9 +144,17 @@ func newMatcher(opts Options) *matcher {
 		method, _ := attrs["http.method"].(string)
 		url, _ := attrs["http.url"].(string)
 
+		var reqBody []byte
+		if rb, ok := attrs["http.request_body"]; ok {
+			if rbs, ok := rb.(string); ok {
+				reqBody = []byte(rbs)
+			}
+		}
+
 		m.responses = append(m.responses, &matchEntry{
 			method: method,
 			url:    url,
+			body:   reqBody,
 			response: &recordedResponse{
 				statusCode: statusCode,
 				headers:    headers,
@@ -156,6 +174,8 @@ func (m *matcher) match(method, url string, body []byte) *recordedResponse {
 	switch m.strategy {
 	case "fingerprint":
 		return m.fingerprintMatch(method, url)
+	case "body":
+		return m.bodyMatch(method, url, body)
 	default:
 		return m.sequentialMatch()
 	}
@@ -180,6 +200,28 @@ func (m *matcher) fingerprintMatch(method, url string) *recordedResponse {
 		}
 	}
 	return nil
+}
+
+func (m *matcher) bodyMatch(method, url string, body []byte) *recordedResponse {
+	canonBody := CanonicalizeRequestBody(body)
+
+	for i, entry := range m.responses {
+		if entry.method != method {
+			continue
+		}
+		if !urlMatch(entry.url, url) {
+			continue
+		}
+		// Compare canonicalized bodies
+		canonEntry := CanonicalizeRequestBody(entry.body)
+		if string(canonBody) == string(canonEntry) {
+			m.responses = append(m.responses[:i], m.responses[i+1:]...)
+			return entry.response
+		}
+	}
+
+	// Fall back to URL-only matching if no body match found
+	return m.fingerprintMatch(method, url)
 }
 
 // urlMatch compares URLs ignoring minor variations.
