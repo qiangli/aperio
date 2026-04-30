@@ -147,17 +147,87 @@ pricing:
     output: 0.015
 ```
 
+## Library Usage
+
+Aperio can be embedded in other Go projects. Public packages are thin facades over the internal implementation, using Go type aliases for full type compatibility.
+
+```go
+import (
+    "github.com/qiangli/aperio/trace"
+    "github.com/qiangli/aperio/runner"
+    "github.com/qiangli/aperio/eval"
+    "github.com/qiangli/aperio/export"
+    "github.com/qiangli/aperio/proxy"
+    "github.com/qiangli/aperio/viewer"
+    "github.com/qiangli/aperio/benchmark"
+)
+```
+
+### Examples
+
+**Read and analyze a trace:**
+```go
+t, err := trace.ReadTrace("agent-trace.json")
+graph := trace.BuildGraph(t)
+llmSpans := t.SpansByType(trace.SpanLLMRequest)
+```
+
+**Record an agent execution:**
+```go
+err := runner.Record(ctx, runner.RecordOptions{
+    Command:    []string{"python", "agent.py"},
+    OutputPath: "trace.json",
+})
+```
+
+**Compare two traces:**
+```go
+left, _ := trace.ReadGraph("a.graph.json")
+right, _ := trace.ReadGraph("b.graph.json")
+result := eval.Evaluate(left, right, nil)
+fmt.Println(eval.FormatText(result, true))
+```
+
+**Export to OTLP:**
+```go
+t, _ := trace.ReadTrace("trace.json")
+otlp := export.ConvertTrace(t, "my-service")
+err := export.Send(otlp, export.SendOptions{Endpoint: "http://localhost:4318/v1/traces"})
+```
+
+| Package | Import Path | Key Types / Functions |
+|---------|------------|----------------------|
+| `trace` | `github.com/qiangli/aperio/trace` | `Span`, `Trace`, `TraceGraph`, `ReadTrace`, `WriteTrace`, `BuildGraph`, `Merge`, `Enrich`, `Diff` |
+| `runner` | `github.com/qiangli/aperio/runner` | `Record`, `Replay`, `RecordOptions`, `ReplayOptions`, `DetectLanguage` |
+| `proxy` | `github.com/qiangli/aperio/proxy` | `Proxy`, `Options`, `Redactor`, `RedactionConfig`, `New` |
+| `eval` | `github.com/qiangli/aperio/eval` | `Evaluate`, `EvalResult`, `EvalConfig`, `FormatText`, `FormatJSON` |
+| `export` | `github.com/qiangli/aperio/export` | `ConvertTrace`, `Send`, `OTLPExportRequest`, `MetricsCollector`, `Batcher` |
+| `viewer` | `github.com/qiangli/aperio/viewer` | `Serve`, `ServeDiff`, `Options`, `DiffOptions` |
+| `benchmark` | `github.com/qiangli/aperio/benchmark` | `Run`, `Compare`, `ParseSpec`, `BenchmarkSpec`, `ComparisonResult`, `GenerateHTML` |
+
 ## Architecture
 
 ```
-cmd/aperio/          CLI entry point (11 subcommands)
-internal/
-  runner/            Record/replay orchestration, language detection
-  tracer/            Python, Node.js, Go (dlv + runtime/trace) tracers
-  proxy/             MITM proxy, cassette format, body matching, normalization
-  trace/             Data model, store, merge, enrich, filter, diff, graph, multi-trace
-  eval/              Tree edit distance, cost functions, semantic metrics
-  export/            OTLP JSON exporter with attribute mapping
-  benchmark/         Spec parsing, runner, black-box tracer, metrics, comparison, reports, leaderboard
-  viewer/            HTML viewer with Cytoscape.js, cost panel, timeline, agent colors
+Public API (importable):
+  trace/               Core data model, I/O, merge, enrich, filter, diff, graph, stream
+  runner/              Record/replay orchestration, language detection
+  proxy/               MITM proxy, redaction
+  eval/                Tree edit distance, similarity metrics
+  export/              OTLP conversion, send, batching, Prometheus metrics
+  viewer/              Interactive HTML trace viewer
+  benchmark/           Benchmarking framework, comparison, leaderboard, adapters
+
+CLI:
+  cmd/aperio/          CLI entry point (11 subcommands)
+
+Internal implementation:
+  internal/
+    runner/            Record/replay orchestration, language detection
+    tracer/            Python, Node.js, Go (dlv + runtime/trace) tracers
+    proxy/             MITM proxy, cassette format, body matching, normalization
+    trace/             Data model, store, merge, enrich, filter, diff, graph, multi-trace
+    eval/              Tree edit distance, cost functions, semantic metrics
+    export/            OTLP JSON exporter with attribute mapping
+    benchmark/         Spec parsing, runner, black-box tracer, metrics, comparison, reports, leaderboard
+    viewer/            HTML viewer with Cytoscape.js, cost panel, timeline, agent colors
 ```

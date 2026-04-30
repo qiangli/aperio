@@ -34,6 +34,16 @@ After capture, traces flow through: **Merge** (correlate function + API spans by
 
 ### Package Layout
 
+**Public packages** (importable by other Go projects via `import "github.com/qiangli/aperio/..."`):**
+- `trace/` — Core data model (`Span`, `Trace`, `TraceGraph`), I/O, merge, enrich, filter, diff, classify, graph, stream
+- `runner/` — Record/replay orchestration, language detection
+- `proxy/` — MITM proxy, redaction configuration
+- `eval/` — Tree edit distance evaluation, similarity metrics
+- `export/` — OTLP JSON conversion, send, batching, Prometheus metrics
+- `viewer/` — Interactive HTML trace viewer server
+- `benchmark/` — Benchmarking framework, comparison, leaderboard, adapters
+
+**Internal packages** (implementation details):
 - `cmd/aperio/` — CLI (cobra) with subcommands: `record`, `replay`, `view`, `diff`, `graph`, `evals`, `export`, `merge-traces`, `benchmark`, `compare`, `leaderboard`
 - `internal/runner/` — Orchestrates the full record/replay lifecycle, language detection
 - `internal/tracer/` — Language-specific tracer implementations + embedded scripts (`scripts/`)
