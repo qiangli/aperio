@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/qiangli/aperio/internal/eval"
 	"github.com/qiangli/aperio/internal/runner"
 	"github.com/qiangli/aperio/internal/trace"
 	"github.com/qiangli/aperio/internal/viewer"
@@ -37,6 +41,8 @@ then renders the execution graph as an interactive HTML page.`,
 	cmd.AddCommand(replayCmd())
 	cmd.AddCommand(viewCmd())
 	cmd.AddCommand(diffCmd())
+	cmd.AddCommand(graphCmd())
+	cmd.AddCommand(evalsCmd())
 
 	return cmd
 }
@@ -44,6 +50,7 @@ then renders the execution graph as an interactive HTML page.`,
 func recordCmd() *cobra.Command {
 	var output string
 	var targets []string
+	var emitGraph bool
 
 	cmd := &cobra.Command{
 		Use:   "record [flags] -- <command> [args...]",
@@ -57,16 +64,40 @@ func recordCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
 
-			return runner.Record(ctx, runner.RecordOptions{
+			err := runner.Record(ctx, runner.RecordOptions{
 				Command:    args,
 				OutputPath: output,
 				Targets:    targets,
 			})
+			if err != nil {
+				return err
+			}
+
+			if emitGraph {
+				tracePath := output
+				if tracePath == "" {
+					// The runner will have generated a default path; we need to find it
+					// Use the same default pattern the runner uses
+					return fmt.Errorf("--graph requires --output to be specified")
+				}
+				t, err := trace.ReadTrace(tracePath)
+				if err != nil {
+					return fmt.Errorf("read trace for graph: %w", err)
+				}
+				g := trace.BuildGraph(t)
+				graphPath := strings.TrimSuffix(tracePath, ".json") + "-graph.json"
+				if err := trace.WriteGraph(graphPath, g); err != nil {
+					return fmt.Errorf("write graph: %w", err)
+				}
+				fmt.Printf("Graph saved to: %s\n", graphPath)
+			}
+			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output trace file path (default: trace-<timestamp>.json)")
 	cmd.Flags().StringSliceVar(&targets, "target", nil, "LLM API hosts to intercept (default: all)")
+	cmd.Flags().BoolVar(&emitGraph, "graph", false, "also emit graph JSON alongside the trace")
 
 	return cmd
 }
@@ -177,4 +208,126 @@ func openBrowser(url string) {
 			return
 		}
 	}
+}
+
+func graphCmd() *cobra.Command {
+	var output string
+	var toStdout bool
+
+	cmd := &cobra.Command{
+		Use:   "graph <trace-file>",
+		Short: "Convert a trace file to an explicit graph JSON representation",
+		Example: `  aperio graph trace.json
+  aperio graph trace.json -o graph.json
+  aperio graph trace.json --stdout`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			t, err := trace.ReadTrace(args[0])
+			if err != nil {
+				return fmt.Errorf("read trace: %w", err)
+			}
+
+			g := trace.BuildGraph(t)
+
+			if toStdout {
+				data, err := json.MarshalIndent(g, "", "  ")
+				if err != nil {
+					return fmt.Errorf("marshal graph: %w", err)
+				}
+				fmt.Println(string(data))
+				return nil
+			}
+
+			if output == "" {
+				base := strings.TrimSuffix(filepath.Base(args[0]), ".json")
+				output = base + "-graph.json"
+			}
+
+			if err := trace.WriteGraph(output, g); err != nil {
+				return fmt.Errorf("write graph: %w", err)
+			}
+
+			fmt.Printf("Graph written to: %s (%d nodes, %d edges)\n",
+				output, g.Stats.NodeCount, g.Stats.EdgeCount)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&output, "output", "o", "", "output graph file path")
+	cmd.Flags().BoolVar(&toStdout, "stdout", false, "write graph JSON to stdout")
+
+	return cmd
+}
+
+func evalsCmd() *cobra.Command {
+	var format string
+	var behavioralOnly bool
+	var threshold float64
+	var verbose bool
+
+	cmd := &cobra.Command{
+		Use:   "evals <graph1.json> <graph2.json>",
+		Short: "Compare two trace graphs and compute similarity scores",
+		Long: `Evaluate how similar two execution traces are using tree edit distance.
+Accepts either graph JSON files (from 'aperio graph') or trace JSON files.`,
+		Example: `  aperio evals recorded-graph.json replayed-graph.json
+  aperio evals trace1.json trace2.json --format json
+  aperio evals a.json b.json --threshold 0.8`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			left, err := loadGraph(args[0])
+			if err != nil {
+				return fmt.Errorf("load left: %w", err)
+			}
+			right, err := loadGraph(args[1])
+			if err != nil {
+				return fmt.Errorf("load right: %w", err)
+			}
+
+			result := eval.Evaluate(left, right, &eval.EvalConfig{
+				BehavioralOnly: behavioralOnly,
+			})
+
+			switch format {
+			case "json":
+				out, err := eval.FormatJSON(result)
+				if err != nil {
+					return err
+				}
+				fmt.Println(out)
+			default:
+				fmt.Print(eval.FormatText(result, verbose))
+			}
+
+			if threshold > 0 && result.OverallSimilarity < threshold {
+				return fmt.Errorf("similarity %.3f is below threshold %.3f",
+					result.OverallSimilarity, threshold)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text or json")
+	cmd.Flags().BoolVar(&behavioralOnly, "behavioral-only", false, "only compute behavioral similarity")
+	cmd.Flags().Float64Var(&threshold, "threshold", 0, "fail if similarity is below this value")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "include full edit script in output")
+
+	return cmd
+}
+
+// loadGraph loads a graph from either a graph JSON file or a trace JSON file.
+func loadGraph(path string) (*trace.TraceGraph, error) {
+	// Try loading as graph first
+	g, err := trace.ReadGraph(path)
+	if err == nil && g.TraceID != "" {
+		return g, nil
+	}
+
+	// Fall back to loading as trace and converting
+	t, err := trace.ReadTrace(path)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s (tried as graph and trace): %w", path, err)
+	}
+
+	return trace.BuildGraph(t), nil
 }
